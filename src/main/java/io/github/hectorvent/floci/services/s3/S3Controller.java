@@ -129,7 +129,6 @@ public class S3Controller {
     private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
     private final io.github.hectorvent.floci.services.floci.ui.UiPages uiPages;
     private final CloudTrailService cloudTrailService;
-    private final AccountResolver accountResolver;
     private final RequestContext requestContext;
     private final IamService iamService;
     private final IamEnforcementFilter iamEnforcementFilter;
@@ -143,7 +142,6 @@ public class S3Controller {
                         io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest,
                         io.github.hectorvent.floci.services.floci.ui.UiPages uiPages,
                         CloudTrailService cloudTrailService,
-                        AccountResolver accountResolver,
                         RequestContext requestContext,
                         IamService iamService,
                         IamEnforcementFilter iamEnforcementFilter,
@@ -156,7 +154,6 @@ public class S3Controller {
         this.currentVertxRequest = currentVertxRequest;
         this.uiPages = uiPages;
         this.cloudTrailService = cloudTrailService;
-        this.accountResolver = accountResolver;
         this.requestContext = requestContext;
         this.iamService = iamService;
         this.iamEnforcementFilter = iamEnforcementFilter;
@@ -192,7 +189,10 @@ public class S3Controller {
             } catch (Exception e) {
                 LOG.tracev(e, "CloudTrail: could not extract request context for S3 event {0}/{1}", bucket, key);
             }
-            String akid = accountResolver.extractAccessKeyId(authHeader);
+            String akid = requestContext.getAccessKeyId();
+            if (akid == null && authHeader != null && authHeader.startsWith("AWS ") && authHeader.indexOf(':') > 4) {
+                akid = authHeader.substring(4, authHeader.indexOf(':'));
+            }
             String region = requestContext.getRegion() != null
                     ? requestContext.getRegion() : regionResolver.getDefaultRegion();
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
