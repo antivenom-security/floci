@@ -116,6 +116,25 @@ def test_ec2_members_keep_their_location_names():
     assert doc["shapes"]["InstanceIdList"] == {"list": "", "locationName": "InstanceId"}
 
 
+def test_event_source_is_the_signing_name_unless_overridden():
+    def source(endpoint_prefix: str, signing: str | None = None) -> str:
+        metadata = {"protocol": "json", "apiVersion": "2020-01-01", "endpointPrefix": endpoint_prefix}
+        if signing:
+            metadata["signingName"] = signing
+        return r.build_model({"metadata": metadata, "operations": {}, "shapes": {}})["eventSource"]
+
+    assert source("api.ecr", "ecr") == "ecr.amazonaws.com"
+    assert source("api.sagemaker", "sagemaker") == "sagemaker.amazonaws.com"
+    assert source("email", "ses") == "ses.amazonaws.com"
+    assert source("s3-control", "s3") == "s3.amazonaws.com"
+    assert source("streams.dynamodb", "dynamodb") == "dynamodb.amazonaws.com"
+    assert source("memory-db", "memorydb") == "memorydb.amazonaws.com"
+    assert source("api.pricing", "pricing") == "pricing.amazonaws.com"
+    assert source("kms") == "kms.amazonaws.com"
+    assert source("portal.sso", "awsssoportal") == "sso.amazonaws.com"
+    assert source("participant.connect", "execute-api") == "participant.connect.amazonaws.com"
+
+
 def test_render_is_one_model_per_line_and_round_trips():
     doc = r.build({"s3": s3_model(), "ec2": ec2_model()}, "botocore test")
     text = r.render(doc)
