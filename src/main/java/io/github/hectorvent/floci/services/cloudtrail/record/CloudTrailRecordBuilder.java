@@ -43,7 +43,7 @@ public class CloudTrailRecordBuilder {
     public static final String EVENT_VERSION = "1.11";
     static final String HIDDEN = "HIDDEN_DUE_TO_SECURITY_REASONS";
     static final int MAX_PARAMETERS_BYTES = 100 * 1024;
-    static final int MAX_FIELD_CHARS = 1024;
+    static final int MAX_FIELD_BYTES = 1024;
 
     private static final Pattern READ_ONLY_PREFIX =
             Pattern.compile("^(Get|List|Describe|Head|BatchGet|Lookup|Search|Check)[A-Z0-9].*");
@@ -303,7 +303,15 @@ public class CloudTrailRecordBuilder {
     }
 
     private static String truncate(String value) {
-        return value.length() > MAX_FIELD_CHARS ? value.substring(0, MAX_FIELD_CHARS) : value;
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length <= MAX_FIELD_BYTES) {
+            return value;
+        }
+        int end = MAX_FIELD_BYTES;
+        while ((bytes[end] & 0xC0) == 0x80) {
+            end--;
+        }
+        return new String(bytes, 0, end, StandardCharsets.UTF_8);
     }
 
     static String lowerFirst(String name) {

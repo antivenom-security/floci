@@ -132,6 +132,7 @@ class OperationResolverTest {
     void anUnmodelledRouteResolvesToNothing() {
         assertNull(resolver.resolve("lambda", context("GET", "/no/such/route", Map.of(), Map.of())));
         assertNull(resolver.resolve("iam", context("POST", "/", Map.of(), Map.of("X-Amz-Target", "Nope.Nothing"))));
+        assertNull(resolver.resolve("no-such-scope", context("GET", "/", Map.of(), Map.of())));
     }
 
     private OperationResolver.Operation query(String scope, String action, String version) {

@@ -75,14 +75,14 @@ class CloudTrailRecordBuilderTest {
         String big = "x".repeat(CloudTrailRecordBuilder.MAX_PARAMETERS_BYTES + 1);
         ObjectNode record = builder.build(minimal("ssm.amazonaws.com", "PutParameter")
                 .requestParameters(mapper.createObjectNode().put("value", big))
-                .userAgent("u".repeat(2000))
+                .userAgent("\u00e9".repeat(2000))
                 .errorCode("E".repeat(2000))
                 .errorMessage("m".repeat(2000))
                 .requestId("r".repeat(2000))
                 .build());
 
         assertFalse(record.has("requestParameters"));
-        assertEquals(1024, record.path("userAgent").asText().length());
+        assertEquals("\u00e9".repeat(512), record.path("userAgent").asText());
         assertEquals(1024, record.path("errorCode").asText().length());
         assertEquals(1024, record.path("errorMessage").asText().length());
         assertEquals(1024, record.path("requestID").asText().length());

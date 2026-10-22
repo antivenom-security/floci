@@ -156,6 +156,9 @@ public class OperationResolver {
     }
 
     private List<Route> routes(String credentialScope) {
+        if (AwsOperationModels.models().stream().noneMatch(info -> info.signingName().equals(credentialScope))) {
+            return List.of();
+        }
         return routesByScope.computeIfAbsent(credentialScope, OperationResolver::compileRoutes);
     }
 
