@@ -1,0 +1,8 @@
+{
+  "_source": "Hand-maintained. readOnly values the operation-name prefix rule gets wrong. KMS: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-management-events-with-cloudtrail.html; Secrets Manager: https://aws.amazon.com/blogs/compute/using-api-destinations-with-amazon-eventbridge/ (read management event). Production samples correct the rest.",
+  "overrides": {
+    "kms.amazonaws.com": {"Decrypt": true, "Encrypt": true, "GenerateDataKey": true},
+    "secretsmanager.amazonaws.com": {"GetSecretValue": true},
+    "s3.amazonaws.com": {"SelectObjectContent": true}
+  }
+}

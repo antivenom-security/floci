@@ -1,0 +1,30 @@
+{
+  "_source": "Hand-maintained. Operations CloudTrail never records as management events: data events (https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-data-events-with-cloudtrail.html, https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/logging-using-cloudtrail.html) and operations it does not log at all (absent from https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/logging_cw_api_calls.html).",
+  "dataEvents": {
+    "s3.amazonaws.com": [
+      "AbortMultipartUpload", "CompleteMultipartUpload", "CopyObject", "CreateMultipartUpload",
+      "DeleteObject", "DeleteObjectTagging", "DeleteObjects", "GetObject", "GetObjectAcl",
+      "GetObjectAttributes", "GetObjectLegalHold", "GetObjectRetention", "GetObjectTagging",
+      "GetObjectTorrent", "HeadObject", "ListObjects", "ListObjectsV2", "ListObjectVersions",
+      "ListMultipartUploads", "ListParts", "PostObject", "PutObject", "PutObjectAcl",
+      "PutObjectLegalHold", "PutObjectRetention", "PutObjectTagging", "RestoreObject",
+      "SelectObjectContent", "UploadPart", "UploadPartCopy", "PutObjectAnnotation",
+      "GetObjectAnnotation", "ListObjectAnnotations", "DeleteObjectAnnotation"
+    ],
+    "dynamodb.amazonaws.com": [
+      "BatchExecuteStatement", "BatchGetItem", "BatchWriteItem", "DeleteItem", "ExecuteStatement",
+      "ExecuteTransaction", "GetItem", "PutItem", "Query", "Scan", "TransactGetItems",
+      "TransactWriteItems", "UpdateItem"
+    ],
+    "lambda.amazonaws.com": ["Invoke", "InvokeWithResponseStream"],
+    "sns.amazonaws.com": ["Publish", "PublishBatch"],
+    "sqs.amazonaws.com": [
+      "SendMessage", "SendMessageBatch", "ReceiveMessage", "DeleteMessage", "DeleteMessageBatch",
+      "ChangeMessageVisibility", "ChangeMessageVisibilityBatch", "GetQueueAttributes", "GetQueueUrl",
+      "ListQueues", "ListQueueTags", "ListDeadLetterSourceQueues"
+    ]
+  },
+  "notLogged": {
+    "logs.amazonaws.com": ["PutLogEvents"]
+  }
+}

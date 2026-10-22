@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.cloudtrail.record.TlsDetails;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
@@ -170,11 +171,13 @@ public class S3Controller {
             String authHeader = null;
             String userAgent = null;
             String sourceIp = null;
+            TlsDetails tlsDetails = null;
             try {
                 var ctx = currentVertxRequest.getCurrent();
                 if (ctx != null) {
                     var req = ctx.request();
                     if (req != null) {
+                        tlsDetails = TlsDetails.of(req);
                         authHeader = req.getHeader("Authorization");
                         userAgent = req.getHeader("User-Agent");
                         String fwd = req.getHeader("X-Forwarded-For");
@@ -205,6 +208,8 @@ public class S3Controller {
                     .errorCode(errorCode)
                     .errorMessage(errorMessage)
                     .eventTimeMillis(System.currentTimeMillis())
+                    .requestId(requestContext.getRequestId())
+                    .tlsDetails(tlsDetails)
                     .build());
         } catch (Exception e) {
             LOG.tracev(e, "CloudTrail event emission failed for {0} {1}/{2}", eventName, bucket, key);

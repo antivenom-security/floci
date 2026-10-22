@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestIdFilter;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -18,9 +19,11 @@ import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedFieldSelecto
 import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
+import io.github.hectorvent.floci.services.cloudtrail.record.CloudTrailEvent;
+import io.github.hectorvent.floci.services.cloudtrail.record.CloudTrailRecordBuilder;
+import io.github.hectorvent.floci.services.cloudtrail.record.TlsDetails;
+import io.github.hectorvent.floci.services.cloudtrail.record.UserIdentityBuilder;
 import io.github.hectorvent.floci.services.iam.IamService;
-import io.github.hectorvent.floci.services.iam.model.AccessKey;
-import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -28,12 +31,10 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -44,15 +45,15 @@ public class CloudTrailService {
 
     private static final Logger LOG = Logger.getLogger(CloudTrailService.class);
 
-    private static final String EVENT_VERSION = "1.11";
     private static final String S3_EVENT_SOURCE = ServicePrincipals.of("s3");
     static final int MAX_PENDING_RECORDS_PER_TRAIL = 1024;
     static final long MAX_PENDING_BYTES_PER_TRAIL = 4L * 1024L * 1024L;
 
     private final StorageBackend<String, CloudTrailEntry> store;
     private final RegionResolver regionResolver;
-    private final IamService iamService;
     private final ObjectMapper mapper;
+    private final CloudTrailRecordBuilder recordBuilder;
+    private final UserIdentityBuilder userIdentityBuilder;
 
     /** Per-trail pending record buffers: ephemeral, never persisted. */
     private final ConcurrentHashMap<PendingTrailKey, PendingRecordBuffer> pendingRecordsByTrail =
@@ -67,14 +68,21 @@ public class CloudTrailService {
      */
     private final ConcurrentHashMap<String, Object> trailLocks = new ConcurrentHashMap<>();
 
+    CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
+                      IamService iamService, ObjectMapper mapper) {
+        this(storageFactory, regionResolver, mapper, new CloudTrailRecordBuilder(mapper),
+                new UserIdentityBuilder(iamService, regionResolver, mapper));
+    }
+
     @Inject
-    public CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
-                             IamService iamService, ObjectMapper mapper) {
+    public CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver, ObjectMapper mapper,
+                             CloudTrailRecordBuilder recordBuilder, UserIdentityBuilder userIdentityBuilder) {
         this.store = storageFactory.create("cloudtrail", "cloudtrail-trails.json",
                 new TypeReference<Map<String, CloudTrailEntry>>() {});
         this.regionResolver = regionResolver;
-        this.iamService = iamService;
         this.mapper = mapper;
+        this.recordBuilder = recordBuilder;
+        this.userIdentityBuilder = userIdentityBuilder;
     }
 
     // --- Control plane ---
@@ -362,7 +370,6 @@ public class CloudTrailService {
             ObjectNode record = buildS3Record(in, region);
             for (MatchedTrail mt : matched) {
                 ObjectNode copy = record.deepCopy();
-                copy.put("recipientAccountId", regionResolver.getAccountId());
                 boolean accepted = append(new TrailKey(mt.region(), mt.trail().name(), region), copy);
                 if (accepted) {
                     LOG.tracev("Emitted CloudTrail event {0} for trail {1}", in.eventName(), mt.trail().name());
@@ -779,13 +786,7 @@ public class CloudTrailService {
     // Package-private for unit testing. A read-only event is one that doesn't change a resource, so
     // SelectObjectContent is one although it is sent as a POST.
     static boolean isReadOnlyEvent(String eventName) {
-        if (eventName == null) return true;
-        return switch (eventName) {
-            case "GetObject", "HeadObject", "ListObjects", "ListObjectsV2",
-                 "GetObjectAcl", "GetObjectTagging", "GetObjectAttributes", "ListMultipartUploads",
-                 "GetObjectAnnotation", "ListObjectAnnotations", "SelectObjectContent" -> true;
-            default -> false;
-        };
+        return eventName == null || CloudTrailRecordBuilder.isReadOnly(S3_EVENT_SOURCE, eventName);
     }
 
     /**
@@ -798,49 +799,27 @@ public class CloudTrailService {
                 ? "s3." + AwsRegions.dnsSuffixFor(region)
                 : AwsEndpoints.s3Host(in.bucketName(), region);
         String partition = AwsRegions.partitionFor(region);
-        ObjectNode record = mapper.createObjectNode();
-        record.put("eventVersion", EVENT_VERSION);
-        record.set("userIdentity", buildUserIdentity(in.accessKeyId()));
-        record.put("eventTime", DateTimeFormatter.ISO_INSTANT.format(
-                Instant.ofEpochMilli((in.eventTimeMillis() == 0L
-                        ? System.currentTimeMillis() : in.eventTimeMillis()))
-                        .truncatedTo(java.time.temporal.ChronoUnit.SECONDS)));
-        record.put("eventSource", S3_EVENT_SOURCE);
-        record.put("eventName", in.eventName());
-        record.put("awsRegion", region);
-        record.put("sourceIPAddress", in.sourceIp() == null ? "127.0.0.1" : in.sourceIp());
-        record.put("userAgent", in.userAgent() == null ? "" : in.userAgent());
-
-        if (in.errorCode() != null) {
-            record.put("errorCode", in.errorCode());
-            if (in.errorMessage() != null) {
-                record.put("errorMessage", in.errorMessage());
-            }
-        }
+        String accountId = regionResolver.getAccountId();
 
         ObjectNode reqParams = mapper.createObjectNode();
         if (in.bucketName() != null) reqParams.put("bucketName", in.bucketName());
         reqParams.put("Host", s3Host);
         if (in.key() != null) reqParams.put("key", in.key());
-        record.set("requestParameters", reqParams);
-        record.set("responseElements", mapper.nullNode());
 
         ObjectNode addl = mapper.createObjectNode();
         addl.put("SignatureVersion", "SigV4");
-        addl.put("CipherSuite", "TLS_AES_128_GCM_SHA256");
+        if (in.tlsDetails() != null) {
+            addl.put("CipherSuite", in.tlsDetails().cipherSuite());
+        }
         addl.put("bytesTransferredIn", in.bytesIn());
         addl.put("AuthenticationMethod", "AuthHeader");
         addl.put("bytesTransferredOut", in.bytesOut());
-        record.set("additionalEventData", addl);
 
-        record.put("requestID", UUID.randomUUID().toString().replace("-", "").substring(0, 16).toUpperCase());
-        record.put("eventID", UUID.randomUUID().toString());
-        record.put("readOnly", isReadOnlyEvent(in.eventName()));
-
+        ArrayNode resources = null;
         if (in.bucketName() != null) {
-            ArrayNode resources = mapper.createArrayNode();
+            resources = mapper.createArrayNode();
             ObjectNode bucketRes = mapper.createObjectNode();
-            bucketRes.put("accountId", regionResolver.getAccountId());
+            bucketRes.put("accountId", accountId);
             bucketRes.put("type", "AWS::S3::Bucket");
             bucketRes.put("ARN", AwsArnUtils.Arn.global(partition, "s3", "", in.bucketName()).toString());
             resources.add(bucketRes);
@@ -851,63 +830,28 @@ public class CloudTrailService {
                         AwsArnUtils.Arn.global(partition, "s3", "", in.bucketName() + "/" + in.key()).toString());
                 resources.add(objRes);
             }
-            record.set("resources", resources);
         }
 
-        record.put("eventType", "AwsApiCall");
-        record.put("managementEvent", false);
-        record.put("eventCategory", "Data");
-
-        ObjectNode tls = mapper.createObjectNode();
-        tls.put("tlsVersion", "TLSv1.3");
-        tls.put("cipherSuite", "TLS_AES_128_GCM_SHA256");
-        tls.put("clientProvidedHostHeader", s3Host);
-        record.set("tlsDetails", tls);
-
-        return record;
-    }
-
-    private ObjectNode buildUserIdentity(String accessKeyId) {
-        ObjectNode identity = mapper.createObjectNode();
-        String accountId = regionResolver.getAccountId();
-
-        if (accessKeyId == null || "test".equals(accessKeyId)) {
-            identity.put("type", "IAMUser");
-            identity.put("principalId", "AIDA" + repeat('A', 17));
-            identity.put("arn", regionResolver.buildGlobalArn("iam", accountId, "root"));
-            identity.put("accountId", accountId);
-            identity.put("accessKeyId", accessKeyId == null ? "" : accessKeyId);
-            identity.put("userName", "root");
-            return identity;
-        }
-
-        AccessKey key = iamService.findAccessKey(accessKeyId).orElse(null);
-        if (key != null) {
-            IamUser user = iamService.findUser(key.getUserName()).orElse(null);
-            if (user != null) {
-                identity.put("type", "IAMUser");
-                identity.put("principalId", user.getUserId());
-                identity.put("arn", user.getArn());
-                identity.put("accountId", accountId);
-                identity.put("accessKeyId", accessKeyId);
-                identity.put("userName", user.getUserName());
-                return identity;
-            }
-        }
-
-        identity.put("type", "IAMUser");
-        identity.put("principalId", "AIDA" + repeat('A', 17));
-        identity.put("arn", regionResolver.buildGlobalArn("iam", accountId, "user/anonymous"));
-        identity.put("accountId", accountId);
-        identity.put("accessKeyId", accessKeyId);
-        identity.put("userName", "anonymous");
-        return identity;
-    }
-
-    private static String repeat(char c, int n) {
-        char[] arr = new char[n];
-        java.util.Arrays.fill(arr, c);
-        return new String(arr);
+        boolean service = in.invokedBy() != null;
+        return recordBuilder.build(CloudTrailEvent.builder()
+                .eventSource(S3_EVENT_SOURCE)
+                .eventName(in.eventName())
+                .awsRegion(region)
+                .eventTime(Instant.ofEpochMilli(in.eventTimeMillis() == 0L
+                        ? System.currentTimeMillis() : in.eventTimeMillis()))
+                .userIdentity(service ? userIdentityBuilder.forService(in.invokedBy())
+                        : userIdentityBuilder.forAccessKey(in.accessKeyId()))
+                .sourceIPAddress(service ? in.invokedBy() : in.sourceIp() == null ? "127.0.0.1" : in.sourceIp())
+                .userAgent(service ? in.invokedBy() : in.userAgent())
+                .errorCode(in.errorCode())
+                .errorMessage(in.errorMessage())
+                .requestParameters(reqParams)
+                .additionalEventData(addl)
+                .requestId(in.requestId() != null ? in.requestId() : RequestIdFilter.s3RequestId())
+                .resources(resources)
+                .tlsDetails(in.tlsDetails())
+                .recipientAccountId(accountId)
+                .build());
     }
 
     private Trail findTrail(String region, String nameOrArn) {
@@ -996,7 +940,10 @@ public class CloudTrailService {
             long bytesOut,
             String errorCode,
             String errorMessage,
-            long eventTimeMillis) {
+            long eventTimeMillis,
+            String requestId,
+            TlsDetails tlsDetails,
+            String invokedBy) {
 
         public static Builder builder() { return new Builder(); }
 
@@ -1013,6 +960,9 @@ public class CloudTrailService {
             private String errorCode;
             private String errorMessage;
             private long eventTimeMillis;
+            private String requestId;
+            private TlsDetails tlsDetails;
+            private String invokedBy;
 
             public Builder region(String v) { this.region = v; return this; }
             public Builder eventName(String v) { this.eventName = v; return this; }
@@ -1026,11 +976,15 @@ public class CloudTrailService {
             public Builder errorCode(String v) { this.errorCode = v; return this; }
             public Builder errorMessage(String v) { this.errorMessage = v; return this; }
             public Builder eventTimeMillis(long v) { this.eventTimeMillis = v; return this; }
+            public Builder requestId(String v) { this.requestId = v; return this; }
+            public Builder tlsDetails(TlsDetails v) { this.tlsDetails = v; return this; }
+            /** The service principal of an action an AWS service took on its own. */
+            public Builder invokedBy(String v) { this.invokedBy = v; return this; }
 
             public S3EventInput build() {
                 return new S3EventInput(region, eventName, bucketName, key, accessKeyId,
                         sourceIp, userAgent, bytesIn, bytesOut,
-                        errorCode, errorMessage, eventTimeMillis);
+                        errorCode, errorMessage, eventTimeMillis, requestId, tlsDetails, invokedBy);
             }
         }
     }

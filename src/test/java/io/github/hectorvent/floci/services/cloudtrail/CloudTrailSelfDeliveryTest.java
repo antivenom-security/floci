@@ -51,6 +51,12 @@ class CloudTrailSelfDeliveryTest {
         assertFalse(selfDeliveries.isEmpty(),
                 "Expected a PutObject record for the trail's own CloudTrail log delivery "
                         + "(self-referential / circular-logging reproduction) but found none");
+        for (JsonNode record : selfDeliveries) {
+            assertEquals("{\"type\":\"AWSService\",\"invokedBy\":\"cloudtrail.amazonaws.com\"}",
+                    record.path("userIdentity").toString());
+            assertEquals("cloudtrail.amazonaws.com", record.path("sourceIPAddress").asText());
+            assertEquals("cloudtrail.amazonaws.com", record.path("userAgent").asText());
+        }
     }
 
     /**
@@ -67,8 +73,7 @@ class CloudTrailSelfDeliveryTest {
             assertEquals("cn-north-1", record.path("awsRegion").asText());
             String bucket = record.path("requestParameters").path("bucketName").asText();
             assertEquals(bucket + ".s3.amazonaws.com.cn", record.path("requestParameters").path("Host").asText());
-            assertEquals(bucket + ".s3.amazonaws.com.cn",
-                    record.path("tlsDetails").path("clientProvidedHostHeader").asText());
+            assertFalse(record.has("tlsDetails"), "a delivery outside any connection has no TLS: " + record);
             for (JsonNode resource : record.path("resources")) {
                 assertTrue(resource.path("ARN").asText().startsWith("arn:aws-cn:s3:::" + bucket),
                         "resource ARN: " + resource);

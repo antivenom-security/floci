@@ -4572,6 +4572,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 session.getOriginAccountId(), session.getRoleArn(), session.getEc2RoleId(), session.getEc2InstanceId()));
     }
 
+    /** What CloudTrail's {@code sessionContext} names about a temporary credential. */
+    public record SessionContextInfo(Instant creationDate, String issuerArn, String issuerUserId) {}
+
+    /** Returns only identity metadata, never the session secret or token. */
+    public Optional<SessionContextInfo> findSessionContext(String accessKeyId) {
+        return currentSession(accessKeyId).map(session -> new SessionContextInfo(
+                session.getCreationDate(), session.getIssuerArn(), session.getIssuerUserId()));
+    }
+
     private Optional<SessionCredential> currentSession(String accessKeyId) {
         return findSessionAnyAccount(accessKeyId).filter(session -> !isExpired(session, clock.instant()));
     }

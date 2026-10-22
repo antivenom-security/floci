@@ -141,14 +141,14 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
         selectSourceBucket(trailName, sourceBucket);
         startLogging(trailName);
 
-        String largeUserAgent = "x".repeat(6000);
+        // A record's userAgent is truncated at 1 KB, as CloudTrail does, so the key carries the bulk.
+        String padding = "/" + "x".repeat(6000);
         for (int i = 0; i < producedEvents; i++) {
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
                     .region("us-east-1")
                     .eventName("PutObject")
                     .bucketName(sourceBucket)
-                    .key(eventKey(i))
-                    .userAgent(largeUserAgent)
+                    .key(eventKey(i) + padding)
                     .eventTimeMillis(System.currentTimeMillis())
                     .build());
             if (i % 100 == 99) {
@@ -164,7 +164,7 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
         assertTrue(delivered.size() < producedEvents,
                 "the byte limit must drop records before the record limit: " + delivered.size());
         assertTrue(delivered.size() > 0, "the byte-limited retry buffer should retain records");
-        assertEquals(eventKey(0),
+        assertEquals(eventKey(0) + padding,
                 delivered.get(0).path("requestParameters").path("key").asText());
     }
 

@@ -16,6 +16,7 @@ public class RequestContext {
     private String accessKeyId;
     private String sessionToken;
     private Boolean iamGovernanceBypass;
+    private String requestId;
 
     public String getAccountId() {
         return accountId;
@@ -74,5 +75,17 @@ public class RequestContext {
 
     public void setIamGovernanceBypass(Boolean iamGovernanceBypass) {
         this.iamGovernanceBypass = iamGovernanceBypass;
+    }
+
+    /**
+     * The id {@link AwsRequestIdFilter} minted for this request: the one the response's request-id
+     * headers carry, and the {@code requestID} of any CloudTrail record the request produces.
+     */
+    public String getRequestId() {
+        return requestId;
+    }
+
+    public void setRequestId(String requestId) {
+        this.requestId = requestId;
     }
 }

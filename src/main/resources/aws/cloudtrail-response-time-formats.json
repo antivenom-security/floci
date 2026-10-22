@@ -1,0 +1,7 @@
+{
+  "_source": "Hand-maintained. java.time patterns (locale en-US) for timestamps inside responseElements, per eventSource, seeded from CloudTrail examples: IAM CreateUser and STS AssumeRole. Any other service renders ISO-8601.",
+  "formats": {
+    "iam.amazonaws.com": "MMM d, yyyy h:mm:ss a",
+    "sts.amazonaws.com": "MMM d, yyyy, h:mm:ss a"
+  }
+}

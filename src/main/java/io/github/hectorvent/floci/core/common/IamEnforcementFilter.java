@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.cloudtrail.record.TlsDetails;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamAuthorizedActions;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
@@ -1420,11 +1421,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
             String userAgent = null;
             String sourceIp = null;
+            TlsDetails tlsDetails = null;
             try {
                 var rc = currentVertxRequest.getCurrent();
                 if (rc != null) {
                     var req = rc.request();
                     if (req != null) {
+                        tlsDetails = TlsDetails.of(req);
                         userAgent = req.getHeader("User-Agent");
                         String fwd = req.getHeader("X-Forwarded-For");
                         if (fwd != null && !fwd.isBlank()) {
@@ -1450,6 +1453,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     .errorCode("AccessDenied")
                     .errorMessage(denyMessage)
                     .eventTimeMillis(System.currentTimeMillis())
+                    .requestId(requestContext.getRequestId())
+                    .tlsDetails(tlsDetails)
                     .build());
         } catch (RuntimeException e) {
             LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", eventName, resource);
