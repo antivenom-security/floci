@@ -6,7 +6,7 @@ This is `antivenom-security/floci`, a fork of [`floci-io/floci`](https://github.
 
 - `main` mirrors upstream `main`. Fast-forward only, never commit to it.
 - `av/main` is upstream plus our work. The monorepo submodule tracks it.
-- `av/p<N>-<slug>` holds one phase of work, squash-merged into `av/main`.
+- `av/p<N>-<slug>` holds one phase of work. It lands as a PR into `av/main` (ready for review, not a draft), squash-merged.
 
 Code follows this repo's `AGENTS.md`, so the work can later go upstream as a batch PR without a rewrite.
 
@@ -20,7 +20,12 @@ git remote add upstream https://github.com/floci-io/floci.git
 
 ## Images
 
-Images are built locally, with no CI: `just floci-image` from the monorepo root runs `make native native-image`. That needs Docker and a JDK 25 on `JAVA_HOME`, and builds for the host arch.
+The phase PR's `Compatibility Tests` workflow verifies the native build. It builds on amd64 and arm64, waits for a healthy start and runs the compatibility suites. It triggers on changes to `src/**`, `pom.xml` and its other listed paths.
+
+For a local native image, either:
+
+- Download the run's `floci-native-image-<arch>` artifact (`gh run download`), `docker load` it, and tag it.
+- Run `just floci-image` from the monorepo root. That runs `make native native-image`, and needs Docker, a JDK 25 on `JAVA_HOME` and about 16 GB of RAM. An 8 GB machine stalls.
 
 Tag: `antivenom/floci:<pom-version>-av.<short-sha>`. The short SHA is the checked-out commit, normally `av/main`.
 
