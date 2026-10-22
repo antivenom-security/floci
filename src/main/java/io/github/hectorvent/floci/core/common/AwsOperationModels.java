@@ -24,9 +24,9 @@ public final class AwsOperationModels {
 
     static final String RESOURCE_NAME = "aws/cloudtrail-operations.json";
 
-    /** A model's header: the credential scope it signs for, its event source, protocol and target prefix. */
+    /** A model's header: its credential scope, event source, protocol, API version and target prefix. */
     public record ModelInfo(String name, String signingName, String eventSource, String protocol,
-                            String targetPrefix) {
+                            String apiVersion, String targetPrefix) {
     }
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -49,14 +49,9 @@ public final class AwsOperationModels {
                 "CloudTrail operation models", in -> load(in, key)));
     }
 
-    /** The first model with {@code eventSource} that defines the operation {@code name}, or null. */
-    public static String modelOf(String eventSource, String name) {
-        for (ModelInfo info : INDEX) {
-            if (info.eventSource().equals(eventSource) && model(info.name()).path("operations").has(name)) {
-                return info.name();
-            }
-        }
-        return null;
+    /** The header of the model {@code name}. */
+    public static ModelInfo info(String name) {
+        return INDEX.stream().filter(info -> info.name().equals(name)).findFirst().orElseThrow();
     }
 
     static List<ModelInfo> index(InputStream in) throws IOException {
@@ -69,6 +64,7 @@ public final class AwsOperationModels {
                 String signingName = null;
                 String eventSource = null;
                 String protocol = null;
+                String apiVersion = null;
                 String targetPrefix = null;
                 while (parser.nextToken() == JsonToken.FIELD_NAME) {
                     String field = parser.currentName();
@@ -77,11 +73,12 @@ public final class AwsOperationModels {
                         case "signingName" -> signingName = parser.getText();
                         case "eventSource" -> eventSource = parser.getText();
                         case "protocol" -> protocol = parser.getText();
+                        case "apiVersion" -> apiVersion = parser.getText();
                         case "targetPrefix" -> targetPrefix = parser.getText();
                         default -> parser.skipChildren();
                     }
                 }
-                index.add(new ModelInfo(name, signingName, eventSource, protocol, targetPrefix));
+                index.add(new ModelInfo(name, signingName, eventSource, protocol, apiVersion, targetPrefix));
             }
         }
         if (index.isEmpty()) {
