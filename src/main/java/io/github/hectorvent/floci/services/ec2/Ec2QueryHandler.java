@@ -1800,7 +1800,10 @@ public class Ec2QueryHandler {
                 .start("flowLogIdSet");
         for (String resourceId : resourceIds) {
             FlowLog fl = flowLogService.createFlowLog(region, resourceId, resourceType, trafficType,
-                    logDestinationType, logDestination, deliverLogsPermissionArn, logFormat, maxAgg);
+                    logDestinationType, logDestination, p.getFirst("LogGroupName"), deliverLogsPermissionArn,
+                    logFormat, maxAgg, p.getFirst("DestinationOptions.FileFormat"),
+                    Boolean.parseBoolean(p.getFirst("DestinationOptions.HiveCompatiblePartitions")),
+                    Boolean.parseBoolean(p.getFirst("DestinationOptions.PerHourPartition")));
             xml.elem("item", fl.getFlowLogId());
         }
         xml.end("flowLogIdSet")
@@ -1832,8 +1835,18 @@ public class Ec2QueryHandler {
                             ? fl.getLogFormat() : FlowLogService.DEFAULT_LOG_FORMAT)
                     .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
                     .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))
-                    .elem("creationTime", ISO_FMT.format(fl.getCreationTime()))
-                    .end("item");
+                    .elem("creationTime", ISO_FMT.format(fl.getCreationTime()));
+            if (fl.getLogGroupName() != null) {
+                xml.elem("logGroupName", fl.getLogGroupName());
+            }
+            if ("s3".equals(fl.getLogDestinationType())) {
+                xml.start("destinationOptions")
+                        .elem("fileFormat", fl.getFileFormat())
+                        .elem("hiveCompatiblePartitions", String.valueOf(fl.isHiveCompatiblePartitions()))
+                        .elem("perHourPartition", String.valueOf(fl.isPerHourPartition()))
+                        .end("destinationOptions");
+            }
+            xml.end("item");
         }
         xml.end("flowLogSet").end("DescribeFlowLogsResponse");
         return xmlResponse(xml.build());

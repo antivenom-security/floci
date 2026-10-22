@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
@@ -25,7 +26,7 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
     /** The defaults createFlowLog applies when the template omits these, kept in step with it. */
     private static final String DEFAULT_RESOURCE_TYPE = "VPC";
     private static final String DEFAULT_TRAFFIC_TYPE = "ALL";
-    private static final String DEFAULT_LOG_DESTINATION_TYPE = "s3";
+    private static final String DEFAULT_LOG_DESTINATION_TYPE = "cloud-watch-logs";
 
     private final FlowLogService flowLogService;
 
@@ -57,17 +58,22 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
                 return;
             }
         }
+        JsonNode options = props == null ? MissingNode.getInstance() : props.path("DestinationOptions");
         FlowLog fl = flowLogService.createFlowLog(ctx.region(),
                 ctx.resolveOptional(props, "ResourceId"),
                 ctx.resolveOptional(props, "ResourceType"),
                 ctx.resolveOptional(props, "TrafficType"),
                 ctx.resolveOptional(props, "LogDestinationType"),
                 ctx.resolveOptional(props, "LogDestination"),
+                ctx.resolveOptional(props, "LogGroupName"),
                 ctx.resolveOptional(props, "DeliverLogsPermissionArn"),
                 ctx.resolveOptional(props, "LogFormat"),
                 props != null && props.hasNonNull("MaxAggregationInterval")
                         ? props.get("MaxAggregationInterval").asInt()
-                        : DEFAULT_MAX_AGGREGATION_INTERVAL);
+                        : DEFAULT_MAX_AGGREGATION_INTERVAL,
+                options.hasNonNull("FileFormat") ? options.get("FileFormat").asText() : null,
+                options.path("HiveCompatiblePartitions").asBoolean(false),
+                options.path("PerHourPartition").asBoolean(false));
         r.setPhysicalId(fl.getFlowLogId());
         r.getAttributes().put("Id", fl.getFlowLogId());
     }

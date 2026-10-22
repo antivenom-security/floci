@@ -339,6 +339,9 @@ floci:
       # reconcile Docker networks on whatever daemon CI happens to have.
       vpc-networks:
         enabled: false
+      flow-logs:
+        capture-tick-seconds: 10
+        s3-publish-interval-seconds: 300
     ecs:
       enabled: true
       mock: true

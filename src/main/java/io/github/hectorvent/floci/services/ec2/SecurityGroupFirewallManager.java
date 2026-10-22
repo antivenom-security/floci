@@ -123,6 +123,8 @@ public class SecurityGroupFirewallManager {
                 .withHostDockerInternalOnLinux()
                 .withEntrypoint(List.of("sh", "-c"))
                 .withCmd(List.of("exec sleep 2147483647"))
+                // Flow logs read per-connection packet and byte counts from conntrack here.
+                .withSysctl("net.netfilter.nf_conntrack_acct", "1")
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region))
                 .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true",
                         ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
@@ -176,6 +178,11 @@ public class SecurityGroupFirewallManager {
             quarantine(helperId);
             throw e;
         }
+    }
+
+    /** The managed ENIs and the helpers owning their namespaces, as flow capture polls them. */
+    public synchronized List<ProtectedEndpoint> protectedEndpoints() {
+        return List.copyOf(endpoints.values());
     }
 
     public synchronized void unregister(String eniId) {
@@ -350,6 +357,6 @@ public class SecurityGroupFirewallManager {
     }
 
     public record Namespace(String helperId, String transportAddress) {}
-    private record ProtectedEndpoint(SecurityGroupNftCompiler.Endpoint endpoint, String helperId,
+    public record ProtectedEndpoint(SecurityGroupNftCompiler.Endpoint endpoint, String helperId,
                                      Map<String, List<String>> prefixLists) {}
 }

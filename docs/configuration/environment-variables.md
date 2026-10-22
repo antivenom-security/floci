@@ -545,6 +545,9 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_EC2_IMDS_PORT` | `9169` | Port for the EC2 Instance Metadata Service (IMDS) endpoint |
 | `FLOCI_SERVICES_EC2_SSH_PORT_RANGE_START` | `2200` | First port in the SSH port range for EC2 instances |
 | `FLOCI_SERVICES_EC2_SSH_PORT_RANGE_END` | `2299` | Last port in the SSH port range |
+| `FLOCI_SERVICES_EC2_FLOW_LOGS_MODE` | (unset) | `observed` (records real traffic of managed ENIs, needs security-group enforcement), `synthetic` (random records) or `off`. Unset: `observed` when security-group enforcement is enabled, else `synthetic` |
+| `FLOCI_SERVICES_EC2_FLOW_LOGS_CAPTURE_TICK_SECONDS` | `10` | Seconds between traffic polls of each managed ENI in `observed` mode |
+| `FLOCI_SERVICES_EC2_FLOW_LOGS_S3_PUBLISH_INTERVAL_SECONDS` | `300` | Seconds between flow-log files written to an S3 destination in `observed` mode |
 
 ### Athena
 
