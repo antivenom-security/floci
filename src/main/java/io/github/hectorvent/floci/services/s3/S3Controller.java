@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.MultipartFormParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestIdFilter;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
@@ -85,7 +86,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
-import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
@@ -1305,7 +1305,7 @@ public class S3Controller {
                 .elem("Message", ByteRange.NOT_SATISFIABLE_MESSAGE)
                 .elem("RangeRequested", rangeHeader)
                 .elem("ActualObjectSize", totalSize)
-                .elem("RequestId", UUID.randomUUID().toString())
+                .elem("RequestId", RequestIdFilter.current())
                 .end("Error")
                 .build();
         return Response.status(416)
@@ -1324,7 +1324,7 @@ public class S3Controller {
                 .elem("Message", PartRange.NOT_SATISFIABLE_MESSAGE)
                 .elem("PartNumberRequested", partNumber.toString())
                 .elem("ActualPartCount", actualPartCount)
-                .elem("RequestId", UUID.randomUUID().toString())
+                .elem("RequestId", RequestIdFilter.current())
                 .end("Error")
                 .build();
         return Response.status(416).entity(xml).type(MediaType.APPLICATION_XML).build();
@@ -3732,7 +3732,7 @@ public class S3Controller {
             }
         }
         String xml = xmlBuilder
-                .elem("RequestId", UUID.randomUUID().toString())
+                .elem("RequestId", RequestIdFilter.current())
                 .end("Error")
                 .build();
         Response.ResponseBuilder response = Response.status(e.getHttpStatus())

@@ -4,7 +4,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * Shared helpers for building AWS Query-protocol (form-encoded POST → XML) responses.
@@ -29,7 +28,7 @@ public final class AwsQueryResponse {
     private AwsQueryResponse() {}
 
     /**
-     * Produces a {@code <ResponseMetadata>} block with a random request ID:
+     * Produces a {@code <ResponseMetadata>} block with the request's id:
      * <pre>{@code
      * <ResponseMetadata><RequestId>UUID</RequestId></ResponseMetadata>
      * }</pre>
@@ -37,7 +36,7 @@ public final class AwsQueryResponse {
     public static String responseMetadata() {
         return new XmlBuilder()
                 .start("ResponseMetadata")
-                  .elem("RequestId", UUID.randomUUID().toString())
+                  .elem("RequestId", RequestIdFilter.current())
                 .end("ResponseMetadata")
                 .build();
     }
