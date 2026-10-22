@@ -1089,6 +1089,14 @@ public interface EmulatorConfig {
     interface Route53ResolverServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** How often query logs are written to S3 destinations. AWS publishes about every 5 minutes. */
+        @WithDefault("300")
+        int queryLogS3IntervalSeconds();
+
+        /** How often query logs are written to CloudWatch Logs destinations. */
+        @WithDefault("60")
+        int queryLogCloudwatchIntervalSeconds();
     }
 
     interface NetworkFirewallServiceConfig {

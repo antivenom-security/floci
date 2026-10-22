@@ -24,6 +24,14 @@
 | `DisassociateResolverRule` | Removes the association between a resolver rule and a VPC. |
 | `GetResolverRuleAssociation` | Returns a resolver rule association by id. |
 | `ListResolverRuleAssociations` | Lists all resolver rule associations. |
+| `CreateResolverQueryLogConfig` | Creates a query logging configuration for an S3 bucket or CloudWatch Logs group, returned as `CREATING`; Firehose destinations are rejected. |
+| `GetResolverQueryLogConfig` | Returns a query logging configuration, `CREATED` once created. |
+| `ListResolverQueryLogConfigs` | Lists all query logging configurations. `Filters`, sorting and paging are ignored. |
+| `DeleteResolverQueryLogConfig` | Deletes a query logging configuration that has no VPC associations. |
+| `AssociateResolverQueryLogConfig` | Associates a query logging configuration with a VPC, returned as `CREATING` and then `ACTIVE`. |
+| `DisassociateResolverQueryLogConfig` | Removes the association between a query logging configuration and a VPC. |
+| `GetResolverQueryLogConfigAssociation` | Returns a query logging association by id. |
+| `ListResolverQueryLogConfigAssociations` | Lists all query logging associations. `Filters`, sorting and paging are ignored. |
 | `TagResource` | Adds or overwrites tags on a resolver endpoint, resolver rule or custom firewall domain list, by ARN. |
 | `UntagResource` | Removes tag keys from a resolver endpoint, resolver rule or custom firewall domain list; absent keys are ignored. |
 | `ListTagsForResource` | Lists a resource's tags, paginated by `MaxResults` (default and maximum 100) and `NextToken`. |
@@ -130,6 +138,28 @@ to the upstream resolvers, which would answer with the wrong address for a name 
 elsewhere. Every other name resolves as usual. This needs no switch of its own: it applies wherever
 cluster DNS does, governed by `floci.services.eks.embedded-dns`.
 
+## Query Logging
+
+Queries answered by Floci's embedded DNS server are logged for VPCs associated with a query
+logging configuration. The query's source address is matched to the managed ENI whose
+security-group namespace sent it (EC2 instances and `awsvpc` ECS tasks), which gives the account,
+region and VPC. Query logging therefore needs `floci.network.security-group-enforcement.enabled`;
+other containers have no ENI and are not logged.
+
+Each record follows the AWS format: `version` `1.100000`, `query_name` with a trailing dot,
+`rcode` and `answers` (`Rdata`, `Type`, `Class`) from the response the client received, `srcaddr`
+the ENI's VPC address, `srcport` as a string, `transport` `UDP`, and `srcids.instance` for an EC2
+instance (`srcids` is empty for a task ENI).
+
+| Destination | Location | Cadence |
+| --- | --- | --- |
+| S3 | `[prefix/]AWSLogs/<acct>/vpcdnsquerylogs/<vpc-id>/YYYY/MM/DD/<vpc-id>_vpcdnsquerylogs_<acct>_YYYYMMDDTHHmmZ_<8 hex>.log.gz`, one JSON record per line | `floci.services.route53resolver.query-log-s3-interval-seconds` (default 300) |
+| CloudWatch Logs | the configured log group, stream `<vpc-id>_<YYYYMMDDTHHmmZ>_<instance-id or eni-id>` | `floci.services.route53resolver.query-log-cloudwatch-interval-seconds` (default 60) |
+
+AWS logs only queries its resolver did not answer from cache. Floci's DNS server has no cache,
+so every query is logged. A delivery that fails (a missing bucket or log group) is logged as a
+warning and its records are dropped.
+
 ## Limitations
 
 - **All create/update operations complete synchronously.** Real AWS transitions a
@@ -163,7 +193,7 @@ cluster DNS does, governed by `floci.services.eks.embedded-dns`.
 - **Cross-account rule sharing is not modelled.** AWS lets an account associate a rule shared with
   it through RAM; Floci reports every rule as `NOT_SHARED` and models no rule policy, so a rule and
   its associations always live in one account and resolution only ever consults that account's own.
-- **DNS Firewall rule groups, query logging and DNSSEC validation do not affect resolution.**
+- **DNS Firewall rule groups and DNSSEC validation do not affect resolution.**
 
 Tags passed to `CreateResolverEndpoint`, `CreateResolverRule` and `CreateFirewallDomainList`
 are stored and read back through `ListTagsForResource`; they never appear on the resource
