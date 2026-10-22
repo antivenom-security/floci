@@ -5,14 +5,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
+import io.github.hectorvent.floci.services.cloudtrail.model.HistoryEvent;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -22,11 +26,16 @@ import java.util.Map;
 public class CloudTrailJsonHandler {
 
     private final CloudTrailService service;
+    private final EventHistoryStore eventHistory;
+    private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
 
     @Inject
-    public CloudTrailJsonHandler(CloudTrailService service, ObjectMapper mapper) {
+    public CloudTrailJsonHandler(CloudTrailService service, EventHistoryStore eventHistory,
+                                 RegionResolver regionResolver, ObjectMapper mapper) {
         this.service = service;
+        this.eventHistory = eventHistory;
+        this.regionResolver = regionResolver;
         this.mapper = mapper;
     }
 
@@ -220,9 +229,56 @@ public class CloudTrailJsonHandler {
     }
 
     private Response lookupEvents(JsonNode req, String region) {
+        JsonNode attributes = req.path("LookupAttributes");
+        if (attributes.size() > 1) {
+            throw new AwsException("InvalidLookupAttributesException",
+                    "You cannot specify more than one lookup attribute.", 400);
+        }
+        JsonNode attribute = attributes.path(0);
         ObjectNode resp = mapper.createObjectNode();
-        resp.putArray("Events");
+        ArrayNode events = resp.putArray("Events");
+        if ("insight".equals(req.path("EventCategory").asText())) {
+            return Response.ok(resp).build();
+        }
+        EventHistoryStore.Page page = eventHistory.lookup(regionResolver.getAccountId(), region,
+                attribute.path("AttributeKey").asText(null), attribute.path("AttributeValue").asText(null),
+                timestamp(req.get("StartTime")), timestamp(req.get("EndTime")),
+                req.has("MaxResults") ? req.path("MaxResults").asInt() : null,
+                req.path("NextToken").asText(null));
+        for (HistoryEvent event : page.events()) {
+            ObjectNode entry = events.addObject();
+            entry.put("EventId", event.eventId());
+            entry.put("EventName", event.eventName());
+            entry.put("ReadOnly", String.valueOf(event.readOnly()));
+            if (event.accessKeyId() != null) {
+                entry.put("AccessKeyId", event.accessKeyId());
+            }
+            entry.put("EventTime", BigDecimal.valueOf(event.eventTimeMillis()).movePointLeft(3));
+            entry.put("EventSource", event.eventSource());
+            if (event.username() != null) {
+                entry.put("Username", event.username());
+            }
+            ArrayNode resources = entry.putArray("Resources");
+            for (HistoryEvent.Resource resource : event.resources()) {
+                resources.addObject().put("ResourceType", resource.resourceType())
+                        .put("ResourceName", resource.resourceName());
+            }
+            entry.put("CloudTrailEvent", event.cloudTrailEvent());
+        }
+        if (page.nextToken() != null) {
+            resp.put("NextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
+    }
+
+    private static Instant timestamp(JsonNode value) {
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (value.isNumber()) {
+            return Instant.ofEpochMilli(value.decimalValue().movePointRight(3).longValue());
+        }
+        return Instant.parse(value.asText());
     }
 
     private Response addTags(JsonNode req) {

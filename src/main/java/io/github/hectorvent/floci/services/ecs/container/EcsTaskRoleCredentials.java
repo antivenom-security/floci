@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs.container;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.services.cloudtrail.ServiceEventEmitter;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
@@ -34,6 +35,7 @@ public class EcsTaskRoleCredentials {
     private static final long ROTATE_WITHIN_SECONDS = 300;
 
     private final IamService iamService;
+    private final ServiceEventEmitter serviceEvents;
     private final long ttlSeconds;
 
     /** taskArn -> the task's current issued session and the relative URI it was published at. */
@@ -41,9 +43,14 @@ public class EcsTaskRoleCredentials {
     /** relative URI path -> the session it resolves to, for the credentials endpoint's lookup. */
     private final Map<String, Issued> byPath = new ConcurrentHashMap<>();
 
-    @Inject
     public EcsTaskRoleCredentials(IamService iamService, EmulatorConfig config) {
+        this(iamService, config, null);
+    }
+
+    @Inject
+    public EcsTaskRoleCredentials(IamService iamService, EmulatorConfig config, ServiceEventEmitter serviceEvents) {
         this.iamService = iamService;
+        this.serviceEvents = serviceEvents;
         this.ttlSeconds = config.services().ecs().taskRoleCredentials().ttlSeconds();
     }
 
@@ -80,6 +87,11 @@ public class EcsTaskRoleCredentials {
             session.setAssumedRoleId(role.get().getRoleId() + ":" + taskSessionName);
         }
         iamService.registerEcsTaskRoleSession(session);
+        if (serviceEvents != null) {
+            serviceEvents.assumeRole("ecs-tasks", AwsArnUtils.regionOrDefault(taskArn, null), roleArn,
+                    taskSessionName, session.getAccessKeyId(), session.getSessionToken(),
+                    session.getAssumedRoleId(), session.getExpiration());
+        }
 
         String path = "/v2/credentials/" + UUID.randomUUID();
         Issued issued = new Issued(session, path);

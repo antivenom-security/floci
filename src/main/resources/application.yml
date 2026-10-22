@@ -896,6 +896,13 @@ floci:
       enabled: true
     cloudtrail:
       enabled: true
+      management-events:
+        enabled: true
+      event-history:
+        retention-days: 90
+        max-events: 200000
+      lookup-rate-limit-per-second: 2
+      trust-forwarded-for: false
     lightsail:
       enabled: true
     cloudcontrol:

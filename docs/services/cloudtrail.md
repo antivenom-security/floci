@@ -3,9 +3,10 @@
 **Protocol:** JSON 1.1 (`X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
-Floci emulates a CloudTrail trail's full life cycle and emits S3 data
-events to the trail's destination bucket as gzipped JSON log files at the
-AWS-shaped key path:
+Floci emulates a CloudTrail trail's full life cycle, records every
+management event in event history, and emits management events and S3
+data events to the trail's destination bucket as gzipped JSON log files at
+the AWS-shaped key path:
 
 ```
 ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_CloudTrail_${region}_${YYYYMMDDTHHMMZ}_${rand12}.json.gz
@@ -25,7 +26,7 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
 | `StartLogging` | Starts logging for a trail |
 | `StopLogging` | Stops logging for a trail |
 | `GetTrailStatus` | Returns the logging status of a trail |
-| `LookupEvents` | - |
+| `LookupEvents` | Returns event history newest first, filtered by one lookup attribute and a time range, with or without a trail |
 | `ListTrails` | - |
 | `AddTags` | Adds or overwrites tags on a trail, identified by ARN |
 | `RemoveTags` | Removes the given tag keys from a trail, identified by ARN |
@@ -39,6 +40,57 @@ and `AWS::S3::Object` data resource ARNs in any of these forms:
 - `arn:aws:s3:::bucket/` — every key in the bucket
 - `arn:aws:s3:::bucket/prefix` — keys with the given prefix
 - `arn:aws:s3:::bucket/prefix/key` — exact key match
+
+## Management Events and Event History
+
+Every signed AWS API call that CloudTrail logs as a management event is
+recorded as an `eventVersion` 1.11 record:
+
+- `eventName` is the model operation, `requestParameters` the parsed input
+  and `responseElements` the parsed output, in CloudTrail's casing. Members
+  the model marks sensitive, and STS `credentials.sessionToken`, read
+  `HIDDEN_DUE_TO_SECURITY_REASONS`.
+- `responseElements` is `null` for read-only calls and errors. A refused call,
+  an IAM denial included, carries `errorCode` and `errorMessage`.
+- `userIdentity` is `Root` for the `test` key and a 12-digit account key,
+  `IAMUser`, `AssumedRole` with its `sessionContext`, `FederatedUser`, or
+  `Unknown`. Global services (IAM, CloudFront, Route 53) record in their
+  partition's signing region, `us-east-1` in `aws`.
+- `sourceIPAddress` is the TCP peer, or the first `X-Forwarded-For` address
+  with `trust-forwarded-for` on.
+
+Data events (S3 object operations, DynamoDB items, Lambda `Invoke`, SNS
+`Publish`, SQS messages) and CloudWatch Logs `PutLogEvents` are not
+management events and are not recorded here.
+
+AWS services' own role assumptions are recorded as `AssumeRole` with an
+`AWSService` identity: ECS task roles (`ecs-tasks.amazonaws.com`), Lambda
+execution roles (`lambda.amazonaws.com`) and EC2 instance profile roles
+(`ec2.amazonaws.com`), each with an `AWS::IAM::Role` resource.
+
+Each record goes to event history, which `LookupEvents` serves per account
+and region whether or not a trail exists, and to every logging trail whose
+selectors cover it. A trail with no selectors logs every management event.
+Basic selectors honor `IncludeManagementEvents`, `ReadWriteType` and
+`ExcludeManagementEventSources`; advanced selectors `eventCategory`,
+`readOnly` and `eventSource`.
+
+`LookupEvents` takes one lookup attribute (`EventId`, `EventName`,
+`ReadOnly`, `Username`, `ResourceType`, `ResourceName`, `EventSource`,
+`AccessKeyId`), `StartTime`, `EndTime`, `MaxResults` up to 50 and
+`NextToken`, and answers `ThrottlingException` past
+`lookup-rate-limit-per-second` calls per second per account and region.
+
+Known gaps:
+
+- Unsigned calls (for example `AssumeRoleWithWebIdentity`) are not recorded.
+- Scalars read from Query forms, REST paths and XML responses are strings.
+- REST request headers and rest-xml bodies are not read into
+  `requestParameters`, and rest-xml responses give no `responseElements`.
+  S3 management events name the bucket `bucket`, not `bucketName`.
+- Global service events reach trails by region alone;
+  `IncludeGlobalServiceEvents` is not consulted.
+- Lambda URL and Lambda Web execution roles are not recorded.
 
 ## S3 Hook Coverage
 
@@ -70,6 +122,11 @@ recorded as `PostObject` when IAM refuses it.
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDTRAIL_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_CLOUDTRAIL_FLUSH_INTERVAL_SECONDS` | `60` | How often the writer flushes buffered records into the destination bucket. Real CloudTrail delivers with ~5 minute latency; the local default is shorter for fast feedback loops. |
+| `FLOCI_SERVICES_CLOUDTRAIL_MANAGEMENT_EVENTS_ENABLED` | `true` | Record management events into event history and trails |
+| `FLOCI_SERVICES_CLOUDTRAIL_EVENT_HISTORY_RETENTION_DAYS` | `90` | How long event history keeps an event |
+| `FLOCI_SERVICES_CLOUDTRAIL_EVENT_HISTORY_MAX_EVENTS` | `200000` | Event history size, across accounts and regions; the oldest events are evicted past it |
+| `FLOCI_SERVICES_CLOUDTRAIL_LOOKUP_RATE_LIMIT_PER_SECOND` | `2` | `LookupEvents` calls allowed per second per account and region |
+| `FLOCI_SERVICES_CLOUDTRAIL_TRUST_FORWARDED_FOR` | `false` | Record the first `X-Forwarded-For` address as `sourceIPAddress` instead of the TCP peer |
 
 ## Example
 
@@ -104,4 +161,8 @@ aws s3 cp s3://my-source/greeting.txt -
 
 # After ~60s, log files appear
 aws s3 ls s3://my-trail-logs/AWSLogs/ --recursive
+
+# Event history, newest first, with or without a trail
+aws cloudtrail lookup-events \
+    --lookup-attributes AttributeKey=EventName,AttributeValue=CreateTrail
 ```
