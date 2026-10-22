@@ -20,15 +20,10 @@ git remote add upstream https://github.com/floci-io/floci.git
 
 ## Images
 
-The phase PR's `Compatibility Tests` workflow verifies the native build. It builds on amd64 and arm64, waits for a healthy start and runs the compatibility suites. It triggers on changes to `src/**`, `pom.xml` and its other listed paths.
+The product image is the JVM image (see the design spec's Decisions). From the monorepo root, after `brew bundle && just setup`:
 
-From the monorepo root (after `brew bundle && just setup`):
-
-- `just floci-image-ci [branch]` loads the native image from the branch's latest successful `Compatibility Tests` run for this machine's arch. CI keeps it for 1 day.
-- `just floci-image-jvm` builds a JVM image from the working copy (`docker/Dockerfile.jvm-package`) in a few minutes. It behaves like native except for native-only reflection and init bugs.
-- `just floci-image` builds native locally with `make native native-image`. It needs about 16 GB of RAM; an 8 GB machine stalls.
-
-Tag: `antivenom/floci:<pom-version>-av.<short-sha>`. The short SHA is the checked-out commit, normally `av/main`.
+- `just floci-image` builds it from the working copy with `docker/Dockerfile.jvm-package`, tagged `antivenom/floci:<pom-version>-av.<short-sha>`. The short SHA is the checked-out commit, normally `av/main`.
+- `just floci-image-native` builds a native image (`-native` tag). It needs about 16 GB of RAM and is only checked before an upstream PR. The fork's `Compatibility Tests` workflow on a PR does the same on amd64 and arm64.
 
 ## Syncing with upstream
 
