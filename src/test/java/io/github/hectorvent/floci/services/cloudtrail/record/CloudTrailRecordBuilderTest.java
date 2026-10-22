@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudtrail.record;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.OperationResolver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -32,6 +33,8 @@ class CloudTrailRecordBuilderTest {
         JsonNode event = doc.path("event");
         String source = event.path("eventSource").asText();
         String name = event.path("eventName").asText();
+        OperationResolver.Operation operation = new OperationResolver.Operation(
+                source.substring(0, source.indexOf('.')), source, name);
 
         ObjectNode record = builder.build(CloudTrailEvent.builder()
                 .eventSource(source)
@@ -41,8 +44,8 @@ class CloudTrailRecordBuilderTest {
                 .userIdentity((ObjectNode) event.path("userIdentity"))
                 .sourceIPAddress(event.path("sourceIPAddress").asText())
                 .userAgent(event.path("userAgent").asText())
-                .requestParameters(builder.parameters(source, name, false, doc.path("input")))
-                .responseElements(builder.parameters(source, name, true, doc.path("output")))
+                .requestParameters(builder.parameters(operation, false, doc.path("input")))
+                .responseElements(builder.parameters(operation, true, doc.path("output")))
                 .requestId(event.path("requestID").asText())
                 .tlsDetails(event.has("tlsDetails") ? mapper.treeToValue(event.path("tlsDetails"), TlsDetails.class)
                         : null)
@@ -72,14 +75,14 @@ class CloudTrailRecordBuilderTest {
         String big = "x".repeat(CloudTrailRecordBuilder.MAX_PARAMETERS_BYTES + 1);
         ObjectNode record = builder.build(minimal("ssm.amazonaws.com", "PutParameter")
                 .requestParameters(mapper.createObjectNode().put("value", big))
-                .userAgent("u".repeat(2000))
+                .userAgent("\u00e9".repeat(2000))
                 .errorCode("E".repeat(2000))
                 .errorMessage("m".repeat(2000))
                 .requestId("r".repeat(2000))
                 .build());
 
         assertFalse(record.has("requestParameters"));
-        assertEquals(1024, record.path("userAgent").asText().length());
+        assertEquals("\u00e9".repeat(512), record.path("userAgent").asText());
         assertEquals(1024, record.path("errorCode").asText().length());
         assertEquals(1024, record.path("errorMessage").asText().length());
         assertEquals(1024, record.path("requestID").asText().length());
@@ -119,7 +122,8 @@ class CloudTrailRecordBuilderTest {
                 mapper.createObjectNode().put("Name", "instance-state-name")
                         .set("Values", mapper.createArrayNode().add("running"))));
 
-        JsonNode rendered = builder.parameters("ec2.amazonaws.com", "DescribeInstances", false, input);
+        JsonNode rendered = builder.parameters(
+                new OperationResolver.Operation("ec2", "ec2.amazonaws.com", "DescribeInstances"), false, input);
 
         assertEquals("{\"filterSet\":{\"items\":[{\"name\":\"instance-state-name\","
                 + "\"valueSet\":{\"items\":[{\"value\":\"running\"}]}}]}}", rendered.toString());

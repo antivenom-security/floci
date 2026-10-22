@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestIdFilter;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import jakarta.enterprise.context.ContextNotActiveException;
@@ -29,7 +30,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * S3 Control API endpoints used by Terraform AWS provider v6.x and other tools.
@@ -380,7 +380,7 @@ public class S3ControlController {
     }
 
     private Response xmlErrorResponse(AwsException e) {
-        String requestId = UUID.randomUUID().toString();
+        String requestId = RequestIdFilter.current();
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("ErrorResponse", AwsNamespaces.S3_CONTROL)

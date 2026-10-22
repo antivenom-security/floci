@@ -112,7 +112,7 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
                     .elem("Code", "ServiceNotAvailableException")
                     .elem("Message", message)
                   .end("Error")
-                  .elem("RequestId", java.util.UUID.randomUUID().toString())
+                  .elem("RequestId", RequestIdFilter.current())
                 .end("ErrorResponse")
                 .build();
         return Response.status(400).entity(xml).type(MediaType.APPLICATION_XML).build();

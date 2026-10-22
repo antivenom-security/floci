@@ -66,40 +66,52 @@ public class OperationResolver {
         if (IamActionRegistry.isQueryRequest(ctx)) {
             String action = actionRegistry.queryAction(ctx);
             if (action != null && !action.isBlank()) {
-                return byName(credentialScope, null, action);
+                return byName(credentialScope, null, action, true, actionRegistry.queryVersion(ctx));
             }
         }
         String target = ctx.getHeaderString("X-Amz-Target");
         if (target != null && target.contains(".")) {
             int dot = target.lastIndexOf('.');
-            return byName(credentialScope, target.substring(0, dot), target.substring(dot + 1));
+            return byName(credentialScope, target.substring(0, dot), target.substring(dot + 1), false, null);
         }
         String path = rawPath(ctx);
         Matcher rpcV2 = RPC_V2_PATH.matcher(path);
         if (rpcV2.matches() && ctx.getHeaderString("smithy-protocol") != null) {
-            return byName(credentialScope, null, rpcV2.group(1));
+            return byName(credentialScope, null, rpcV2.group(1), false, null);
         }
         return byRoute(credentialScope, ctx.getMethod().toUpperCase(), path,
                 ctx.getUriInfo().getQueryParameters(), ctx);
     }
 
-    /** The operation {@code name} in a model the target prefix names, or else one signed for as the scope. */
-    private static Operation byName(String credentialScope, String targetPrefix, String name) {
-        Operation bySigningName = null;
+    /**
+     * The operation {@code name} in a model the target prefix names, or else in one signed for as the
+     * scope: for a Query request a Query or EC2 model, preferring the one whose API version is the
+     * request's {@code Version} and then the one named for the scope, as RDS is beside DocumentDB.
+     */
+    private static Operation byName(String credentialScope, String targetPrefix, String name, boolean query,
+                                    String version) {
+        Operation best = null;
+        int bestScore = -1;
         for (AwsOperationModels.ModelInfo info : AwsOperationModels.models()) {
             boolean prefixMatches = targetPrefix != null && targetPrefix.equals(info.targetPrefix());
-            if (!prefixMatches && (bySigningName != null || !info.signingName().equals(credentialScope))) {
+            boolean queryModel = "query".equals(info.protocol()) || "ec2".equals(info.protocol());
+            if (!prefixMatches && (!info.signingName().equals(credentialScope) || queryModel != query)) {
                 continue;
             }
-            if (AwsOperationModels.model(info.name()).path("operations").has(name)) {
-                Operation operation = new Operation(info.name(), info.eventSource(), name);
-                if (prefixMatches) {
-                    return operation;
-                }
-                bySigningName = operation;
+            if (!AwsOperationModels.model(info.name()).path("operations").has(name)) {
+                continue;
+            }
+            if (prefixMatches) {
+                return new Operation(info.name(), info.eventSource(), name);
+            }
+            int score = (info.apiVersion().equals(version) ? 2 : 0)
+                    + (info.name().equals(credentialScope) ? 1 : 0);
+            if (score > bestScore) {
+                best = new Operation(info.name(), info.eventSource(), name);
+                bestScore = score;
             }
         }
-        return bySigningName;
+        return best;
     }
 
     private Operation byRoute(String credentialScope, String method, String path,
@@ -144,6 +156,9 @@ public class OperationResolver {
     }
 
     private List<Route> routes(String credentialScope) {
+        if (AwsOperationModels.models().stream().noneMatch(info -> info.signingName().equals(credentialScope))) {
+            return List.of();
+        }
         return routesByScope.computeIfAbsent(credentialScope, OperationResolver::compileRoutes);
     }
 

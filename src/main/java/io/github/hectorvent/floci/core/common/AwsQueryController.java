@@ -39,7 +39,6 @@ import org.jboss.logging.Logger;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -363,7 +362,7 @@ public class AwsQueryController {
                     .elem("Code", "UnsupportedOperation")
                     .elem("Message", "Operation " + action + " is not supported by Cognito via Query protocol.")
                   .end("Error")
-                  .elem("RequestId", UUID.randomUUID().toString())
+                  .elem("RequestId", RequestIdFilter.current())
                 .end("ErrorResponse")
                 .build();
         return Response.status(400).entity(xml).type(MediaType.APPLICATION_XML).build();
@@ -533,7 +532,7 @@ public class AwsQueryController {
                     .elem("Code", code)
                     .elem("Message", message)
                   .end("Error")
-                  .elem("RequestId", UUID.randomUUID().toString())
+                  .elem("RequestId", RequestIdFilter.current())
                 .end("ErrorResponse")
                 .build();
         return Response.status(status).entity(xml).type(MediaType.APPLICATION_XML).build();
