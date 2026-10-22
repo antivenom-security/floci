@@ -22,10 +22,11 @@ git remote add upstream https://github.com/floci-io/floci.git
 
 The phase PR's `Compatibility Tests` workflow verifies the native build. It builds on amd64 and arm64, waits for a healthy start and runs the compatibility suites. It triggers on changes to `src/**`, `pom.xml` and its other listed paths.
 
-For a local native image, either:
+From the monorepo root (after `brew bundle && just setup`):
 
-- Download the run's `floci-native-image-<arch>` artifact (`gh run download`), `docker load` it, and tag it.
-- Run `just floci-image` from the monorepo root. That runs `make native native-image`, and needs Docker, a JDK 25 on `JAVA_HOME` and about 16 GB of RAM. An 8 GB machine stalls.
+- `just floci-image-ci [branch]` loads the native image from the branch's latest successful `Compatibility Tests` run for this machine's arch. CI keeps it for 1 day.
+- `just floci-image-jvm` builds a JVM image from the working copy (`docker/Dockerfile.jvm-package`) in a few minutes. It behaves like native except for native-only reflection and init bugs.
+- `just floci-image` builds native locally with `make native native-image`. It needs about 16 GB of RAM; an 8 GB machine stalls.
 
 Tag: `antivenom/floci:<pom-version>-av.<short-sha>`. The short SHA is the checked-out commit, normally `av/main`.
 
@@ -38,4 +39,4 @@ Upstream releases on the 15th and the last day of each month. After each release
 3. Rebase `av/main` onto `upstream/main`.
 4. Push with `--force-with-lease`.
 
-Then run `just floci-test`, rebuild the image, and commit the new submodule pointer in the monorepo.
+Then run `just floci-check` and `just floci-test`, rebuild the image, and commit the new submodule pointer in the monorepo.
