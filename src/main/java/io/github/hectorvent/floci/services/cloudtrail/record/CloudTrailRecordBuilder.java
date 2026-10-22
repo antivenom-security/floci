@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsOperationModels;
+import io.github.hectorvent.floci.core.common.OperationResolver;
 import io.github.hectorvent.floci.core.common.VendoredResources;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -42,7 +43,7 @@ public class CloudTrailRecordBuilder {
     public static final String EVENT_VERSION = "1.11";
     static final String HIDDEN = "HIDDEN_DUE_TO_SECURITY_REASONS";
     static final int MAX_PARAMETERS_BYTES = 100 * 1024;
-    static final int MAX_FIELD_CHARS = 1024;
+    static final int MAX_FIELD_BYTES = 1024;
 
     private static final Pattern READ_ONLY_PREFIX =
             Pattern.compile("^(Get|List|Describe|Head|BatchGet|Lookup|Search|Check)[A-Z0-9].*");
@@ -116,19 +117,18 @@ public class CloudTrailRecordBuilder {
     }
 
     /**
-     * {@code value}, the input ({@code output} false) or output of {@code operation} keyed by model
-     * member names, in CloudTrail's form, or null when the operation is not modelled.
+     * {@code value}, the input ({@code output} false) or output of the resolved {@code operation} keyed by
+     * model member names, in CloudTrail's form, or null when the operation is not modelled.
      */
-    public JsonNode parameters(String eventSource, String operation, boolean output, JsonNode value) {
-        String model = AwsOperationModels.modelOf(eventSource, operation);
-        if (model == null || value == null || value.isNull()) {
+    public JsonNode parameters(OperationResolver.Operation operation, boolean output, JsonNode value) {
+        JsonNode modelNode = AwsOperationModels.model(operation.model());
+        JsonNode op = modelNode.path("operations").get(operation.name());
+        if (op == null || value == null || value.isNull()) {
             return null;
         }
-        JsonNode modelNode = AwsOperationModels.model(model);
-        String shape = modelNode.path("operations").path(operation).path(output ? "output" : "input").asText(null);
-        String protocol = AwsOperationModels.models().stream()
-                .filter(info -> info.name().equals(model)).findFirst().orElseThrow().protocol();
-        Rendering rendering = new Rendering(modelNode.path("shapes"), eventSource,
+        String shape = op.path(output ? "output" : "input").asText(null);
+        String protocol = AwsOperationModels.info(operation.model()).protocol();
+        Rendering rendering = new Rendering(modelNode.path("shapes"), operation.eventSource(),
                 "query".equals(protocol) || "ec2".equals(protocol), "ec2".equals(protocol), output);
         return render(rendering, shape, value);
     }
@@ -303,7 +303,15 @@ public class CloudTrailRecordBuilder {
     }
 
     private static String truncate(String value) {
-        return value.length() > MAX_FIELD_CHARS ? value.substring(0, MAX_FIELD_CHARS) : value;
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length <= MAX_FIELD_BYTES) {
+            return value;
+        }
+        int end = MAX_FIELD_BYTES;
+        while ((bytes[end] & 0xC0) == 0x80) {
+            end--;
+        }
+        return new String(bytes, 0, end, StandardCharsets.UTF_8);
     }
 
     static String lowerFirst(String name) {

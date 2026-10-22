@@ -49,7 +49,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -1695,7 +1694,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     .elem("Code", code)
                     .elem("Message", message)
                   .end("Error")
-                  .elem("RequestId", UUID.randomUUID().toString())
+                  .elem("RequestId", RequestIdFilter.current())
                 .end("ErrorResponse")
                 .build();
         return Response.status(status).type(MediaType.APPLICATION_XML).entity(xml).build();
@@ -1722,7 +1721,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (resourcePath != null && !resourcePath.isBlank()) {
             xml.elem("Resource", resourcePath);
         }
-        xml.elem("RequestId", UUID.randomUUID().toString())
+        xml.elem("RequestId", RequestIdFilter.current())
            .end("Error");
         return Response.status(status).type(MediaType.APPLICATION_XML).entity(xml.build()).build();
     }

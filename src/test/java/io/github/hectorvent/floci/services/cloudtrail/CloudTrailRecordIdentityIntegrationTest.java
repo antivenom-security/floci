@@ -32,7 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * S3 data events record who called and the request id the caller received: an IAM user's key is an
  * {@code IAMUser}, an assumed-role session an {@code AssumedRole} with its {@code sessionIssuer},
- * and the {@code test} key the account {@code Root}. A plain-HTTP call carries no {@code tlsDetails}.
+ * the {@code test} key the account {@code Root}, a presigned URL the key it names, and an unsigned
+ * call AWS's anonymous {@code AWSAccount}. A plain-HTTP call carries no {@code tlsDetails}.
  */
 @QuarkusTest
 class CloudTrailRecordIdentityIntegrationTest {
@@ -88,10 +89,15 @@ class CloudTrailRecordIdentityIntegrationTest {
         requestIds.put("user.txt", put(bucket, "user.txt", auth(user.accessKeyId(), "s3"), null));
         requestIds.put("role.txt", put(bucket, "role.txt", auth(session.accessKeyId(), "s3"), session.sessionToken()));
         requestIds.put("root.txt", put(bucket, "root.txt", root, null));
+        String presignedId = given().urlEncodingEnabled(false).when()
+                .get("/" + bucket + "/user.txt?" + EnforcementFixtures.presignedQuery(user.accessKeyId(), "s3"))
+                .then().statusCode(200).extract().header("x-amz-request-id");
+        String anonymousId = given().when().get("/" + bucket + "/root.txt")
+                .then().statusCode(200).extract().header("x-amz-request-id");
 
         writer.flushNow();
 
-        Map<String, JsonNode> records = putRecords(logs, root);
+        Map<String, JsonNode> records = records(logs, root, "PutObject");
         assertEquals(requestIds.keySet(), records.keySet(), "records: " + records);
         for (Map.Entry<String, String> entry : requestIds.entrySet()) {
             JsonNode record = records.get(entry.getKey());
@@ -126,6 +132,16 @@ class CloudTrailRecordIdentityIntegrationTest {
         JsonNode rootIdentity = records.get("root.txt").path("userIdentity");
         assertEquals("{\"type\":\"Root\",\"principalId\":\"" + ACCOUNT + "\",\"arn\":\"arn:aws:iam::" + ACCOUNT
                 + ":root\",\"accountId\":\"" + ACCOUNT + "\",\"accessKeyId\":\"test\"}", rootIdentity.toString());
+
+        Map<String, JsonNode> gets = records(logs, root, "GetObject");
+        JsonNode presigned = gets.get("user.txt");
+        assertEquals(presignedId, presigned.path("requestID").asText(), presigned.toString());
+        assertEquals("IAMUser", presigned.path("userIdentity").path("type").asText(), presigned.toString());
+        assertEquals(user.accessKeyId(), presigned.path("userIdentity").path("accessKeyId").asText());
+        JsonNode anonymous = gets.get("root.txt");
+        assertEquals(anonymousId, anonymous.path("requestID").asText(), anonymous.toString());
+        assertEquals("{\"type\":\"AWSAccount\",\"principalId\":\"\",\"accountId\":\"anonymous\"}",
+                anonymous.path("userIdentity").toString());
     }
 
     private static String put(String bucket, String key, String authorization, String token) {
@@ -137,8 +153,9 @@ class CloudTrailRecordIdentityIntegrationTest {
                 .extract().header("x-amz-request-id");
     }
 
-    /** The trail's PutObject records of objects in the source bucket, by key. */
-    private static Map<String, JsonNode> putRecords(String logs, String authorization) throws Exception {
+    /** The trail's {@code eventName} records of objects in the source bucket, by key. */
+    private static Map<String, JsonNode> records(String logs, String authorization, String eventName)
+            throws Exception {
         String listing = given().header("Authorization", authorization).get("/" + logs + "?list-type=2")
                 .then().statusCode(200).extract().asString();
         ObjectMapper mapper = new ObjectMapper();
@@ -149,7 +166,7 @@ class CloudTrailRecordIdentityIntegrationTest {
                     .then().statusCode(200).extract().asByteArray();
             try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(gz))) {
                 for (JsonNode record : mapper.readTree(in.readAllBytes()).path("Records")) {
-                    if ("PutObject".equals(record.path("eventName").asText())) {
+                    if (eventName.equals(record.path("eventName").asText())) {
                         records.put(record.path("requestParameters").path("key").asText(), record);
                     }
                 }

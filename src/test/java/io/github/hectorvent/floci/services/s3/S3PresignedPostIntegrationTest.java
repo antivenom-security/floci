@@ -616,7 +616,7 @@ class S3PresignedPostIntegrationTest {
                         + "\\Q<Code>AccessDenied</Code>\\E"
                         + "\\Q<Message>Invalid according to Policy: Policy Condition failed: \\E"
                         + "\\Q[&quot;eq&quot;, &quot;$Content-Type&quot;, &quot;image/png&quot;]</Message>\\E"
-                        + "<RequestId>[0-9a-f\\-]+</RequestId>"
+                        + "<RequestId>[0-9A-F]{16}</RequestId>"
                         + "\\Q</Error>\\E"));
     }
 

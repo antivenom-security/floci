@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
 /**
  * The {@code userIdentity} of a CloudTrail record, in the forms the CloudTrail userIdentity
  * element reference documents: {@code Root}, {@code IAMUser}, {@code AssumedRole},
- * {@code FederatedUser}, {@code AWSService} and {@code Unknown}.
+ * {@code FederatedUser}, {@code AWSService}, {@code Unknown} and the anonymous {@code AWSAccount}.
  *
  * <p>Floci's root stand-in keys, {@code test} and a 12-digit account id, are the account root.
  * Every other key is resolved through IAM: a user's long-term key, an assumed-role session, a
@@ -41,10 +41,14 @@ public class UserIdentityBuilder {
         this.mapper = mapper;
     }
 
-    /** The identity of a request signed with {@code accessKeyId}; an unsigned request is the account root. */
+    /** The identity of a request signed with {@code accessKeyId}; an unsigned request is AWS's anonymous caller. */
     public ObjectNode forAccessKey(String accessKeyId) {
         if (accessKeyId == null || accessKeyId.isEmpty()) {
-            return root(regionResolver.getAccountId(), null);
+            ObjectNode identity = mapper.createObjectNode();
+            identity.put("type", "AWSAccount");
+            identity.put("principalId", "");
+            identity.put("accountId", "anonymous");
+            return identity;
         }
         if ("test".equals(accessKeyId) || ACCOUNT_ID.matcher(accessKeyId).matches()) {
             return root(ACCOUNT_ID.matcher(accessKeyId).matches() ? accessKeyId : regionResolver.getAccountId(),
