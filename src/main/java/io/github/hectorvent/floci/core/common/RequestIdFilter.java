@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.services.s3.S3Controller;
+import io.quarkus.arc.Arc;
+import io.quarkus.arc.ArcContainer;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Priorities;
@@ -37,6 +39,22 @@ public class RequestIdFilter implements ContainerRequestFilter {
     public void filter(ContainerRequestContext ctx) {
         boolean s3 = resourceInfo != null && S3Controller.class.equals(resourceInfo.getResourceClass());
         requestContext.setRequestId(s3 ? s3RequestId() : UUID.randomUUID().toString());
+    }
+
+    /**
+     * The current request's id, for a response body to carry the id its headers do; minted and kept
+     * when no resource filter has run yet. A fresh UUID outside a request.
+     */
+    public static String current() {
+        ArcContainer container = Arc.container();
+        if (container == null || !container.isRunning() || !container.requestContext().isActive()) {
+            return UUID.randomUUID().toString();
+        }
+        RequestContext context = container.instance(RequestContext.class).get();
+        if (context.getRequestId() == null) {
+            context.setRequestId(UUID.randomUUID().toString());
+        }
+        return context.getRequestId();
     }
 
     /** A request id in S3's 16-character uppercase hex form. */

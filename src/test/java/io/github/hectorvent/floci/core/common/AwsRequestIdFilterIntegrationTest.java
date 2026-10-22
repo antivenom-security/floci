@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Verifies that {@link AwsRequestIdFilter} injects {@code x-amz-request-id} and
@@ -57,6 +59,15 @@ class AwsRequestIdFilterIntegrationTest {
             .statusCode(404)
             .header("x-amz-request-id", notNullValue())
             .header("x-amzn-RequestId", notNullValue());
+    }
+
+    @Test
+    void s3ErrorBodyCarriesTheHeaderRequestId() {
+        Response response = given().get("/no-such-bucket-floci-test");
+        String requestId = response.header("x-amz-request-id");
+
+        assertEquals(404, response.statusCode());
+        assertEquals(requestId, response.xmlPath().getString("Error.RequestId"));
     }
 
     @Test
@@ -130,6 +141,19 @@ class AwsRequestIdFilterIntegrationTest {
             .statusCode(200)
             .header("x-amz-request-id", notNullValue())
             .header("x-amzn-RequestId", notNullValue());
+    }
+
+    @Test
+    void queryResponseMetadataCarriesTheHeaderRequestId() {
+        Response response = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListTopics")
+            .formParam("Version", "2010-03-31")
+            .post("/");
+
+        assertEquals(200, response.statusCode());
+        assertEquals(response.header("x-amz-request-id"),
+                response.xmlPath().getString("ListTopicsResponse.ResponseMetadata.RequestId"));
     }
 
     // --- JSON 1.1 protocol (SSM) ---

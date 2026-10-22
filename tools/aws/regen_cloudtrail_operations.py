@@ -10,7 +10,8 @@ Query and EC2 protocols use each member's `locationName`), with every member the
 
 Per model:
   signingName   the credential scope its requests are signed for
-  eventSource   `<endpointPrefix>.amazonaws.com`, the form CloudTrail records in every partition
+  eventSource   `<signingName>.amazonaws.com`, the form CloudTrail records in every partition, except
+                where EVENT_SOURCE_OVERRIDES names the source by endpoint prefix
   protocol      the model's wire protocol
   apiVersion    the model's API version
   targetPrefix  the `X-Amz-Target` prefix (JSON protocols only)
@@ -48,6 +49,11 @@ CATALOG = REPO_ROOT / "src/main/java/io/github/hectorvent/floci/core/common/Reso
 CREDENTIAL_SCOPES_RE = re.compile(r"protocols\([^)]*\),\s*Set\.of\([^)]*\),\s*Set\.of\(([^)]*)\)")
 REST_PROTOCOLS = ("rest-json", "rest-xml")
 LOCATION_NAME_PROTOCOLS = ("query", "ec2")
+EVENT_SOURCE_OVERRIDES = {
+    "participant.connect": "participant.connect",
+    "portal.sso": "sso",
+    "servicecatalog-appregistry": "servicecatalog-appregistry",
+}
 
 
 def catalog_scopes(java_source: str) -> set[str]:
@@ -163,7 +169,7 @@ def build_model(model: dict) -> dict:
         operations[name] = entry
     doc: dict = {
         "signingName": signing_name(model),
-        "eventSource": f"{metadata['endpointPrefix']}.amazonaws.com",
+        "eventSource": f"{EVENT_SOURCE_OVERRIDES.get(metadata['endpointPrefix'], signing_name(model))}.amazonaws.com",
         "protocol": protocol,
         "apiVersion": metadata["apiVersion"],
     }

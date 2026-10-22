@@ -120,9 +120,28 @@ class OperationResolverTest {
     }
 
     @Test
+    void aQueryActionSharedByModelsResolvesToTheRequestsModel() {
+        assertEquals("rds", query("rds", "CreateDBInstance", "2014-10-31").model());
+        assertEquals("ses", query("ses", "SendEmail", "2010-12-01").model());
+        assertEquals("elb", query("elasticloadbalancing", "CreateLoadBalancer", "2012-06-01").model());
+        assertEquals("elbv2", query("elasticloadbalancing", "CreateLoadBalancer", "2015-12-01").model());
+        assertEquals("elbv2", query("elasticloadbalancing", "DescribeLoadBalancers", "2015-12-01").model());
+    }
+
+    @Test
     void anUnmodelledRouteResolvesToNothing() {
         assertNull(resolver.resolve("lambda", context("GET", "/no/such/route", Map.of(), Map.of())));
         assertNull(resolver.resolve("iam", context("POST", "/", Map.of(), Map.of("X-Amz-Target", "Nope.Nothing"))));
+        assertNull(resolver.resolve("no-such-scope", context("GET", "/", Map.of(), Map.of())));
+    }
+
+    private OperationResolver.Operation query(String scope, String action, String version) {
+        ContainerRequestContext ctx = context("GET", "/", Map.of(), Map.of());
+        when(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(new ProtocolClaim(WireProtocol.AWS_QUERY, null, null, null));
+        when(registry.queryAction(ctx)).thenReturn(action);
+        when(registry.queryVersion(ctx)).thenReturn(version);
+        return resolver.resolve(scope, ctx);
     }
 
     private String rest(String scope, String method, String path, Map<String, String> query,
