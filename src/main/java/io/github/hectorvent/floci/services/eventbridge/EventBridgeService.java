@@ -864,9 +864,11 @@ public class EventBridgeService implements ResourceProvider {
             String eventId = UUID.randomUUID().toString();
             String rulePrefix = ruleKeyPrefix(region, effectiveBus);
             List<Rule> candidateRules = accountScan(ruleStore, accountId, k -> k.startsWith(rulePrefix));
+            boolean cloudTrailReadOnly = isCloudTrailReadOnlyManagementEvent(entry);
 
             for (Rule rule : candidateRules) {
-                if (rule.getState() != RuleState.ENABLED) {
+                if (rule.getState() == RuleState.DISABLED
+                        || (rule.getState() == RuleState.ENABLED && cloudTrailReadOnly)) {
                     continue;
                 }
                 // A rule without an event pattern is a schedule rule: it never matches put events.
@@ -892,6 +894,24 @@ public class EventBridgeService implements ResourceProvider {
         }
 
         return new PutEventsResult(failed, resultEntries);
+    }
+
+    /**
+     * Whether the entry is a read-only management event from CloudTrail, which only rules in state
+     * ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS match. Read from the event itself, so it holds
+     * when the event is forwarded to another bus or replayed from an archive.
+     */
+    private boolean isCloudTrailReadOnlyManagementEvent(Map<String, Object> entry) {
+        if (!(entry.get("Source") instanceof String source) || !source.startsWith("aws.")
+                || !(entry.get("DetailType") instanceof String detailType) || !detailType.endsWith(" via CloudTrail")) {
+            return false;
+        }
+        try {
+            JsonNode detail = objectMapper.readTree((String) entry.get("Detail"));
+            return detail.path("managementEvent").asBoolean() && detail.path("readOnly").asBoolean();
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     private boolean isValidDetailJson(Map<String, Object> detail) {
@@ -2005,7 +2025,7 @@ public class EventBridgeService implements ResourceProvider {
 
     private void startSchedulerIfNeeded(Rule rule) {
         if (ruleScheduler != null
-                && rule.getState() == RuleState.ENABLED
+                && rule.getState() != RuleState.DISABLED
                 && rule.getScheduleExpression() != null
                 && !rule.getScheduleExpression().isBlank()) {
             String region = rule.getRegion() != null ? rule.getRegion() : regionResolver.getDefaultRegion();

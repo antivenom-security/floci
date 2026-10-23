@@ -5,14 +5,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
+import io.github.hectorvent.floci.services.cloudtrail.model.HistoryEvent;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -22,11 +26,19 @@ import java.util.Map;
 public class CloudTrailJsonHandler {
 
     private final CloudTrailService service;
+    private final EventHistoryStore eventHistory;
+    private final CloudTrailDigestWriter digestWriter;
+    private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
 
     @Inject
-    public CloudTrailJsonHandler(CloudTrailService service, ObjectMapper mapper) {
+    public CloudTrailJsonHandler(CloudTrailService service, EventHistoryStore eventHistory,
+                                 CloudTrailDigestWriter digestWriter, RegionResolver regionResolver,
+                                 ObjectMapper mapper) {
         this.service = service;
+        this.eventHistory = eventHistory;
+        this.digestWriter = digestWriter;
+        this.regionResolver = regionResolver;
         this.mapper = mapper;
     }
 
@@ -43,6 +55,7 @@ public class CloudTrailJsonHandler {
             case "GetTrailStatus" -> getTrailStatus(request, region);
             case "LookupEvents" -> lookupEvents(request, region);
             case "ListTrails" -> listTrails(request, region);
+            case "ListPublicKeys" -> listPublicKeys(request, region);
             case "AddTags" -> addTags(request);
             case "RemoveTags" -> removeTags(request);
             case "ListTags" -> listTags(request);
@@ -65,7 +78,8 @@ public class CloudTrailJsonHandler {
         Map<String, String> tags = parseTagsList(req.path("TagsList"));
 
         Trail trail = service.createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags,
+                req.path("CloudWatchLogsLogGroupArn").asText(null), req.path("CloudWatchLogsRoleArn").asText(null));
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());
@@ -80,6 +94,7 @@ public class CloudTrailJsonHandler {
         resp.put("TrailARN", trail.trailArn());
         resp.put("LogFileValidationEnabled", trail.logFileValidationEnabled());
         resp.put("IsOrganizationTrail", trail.isOrganizationTrail());
+        putCloudWatchLogs(resp, trail);
         return Response.ok(resp).build();
     }
 
@@ -105,7 +120,8 @@ public class CloudTrailJsonHandler {
                 ? req.path("IsOrganizationTrail").asBoolean() : null;
 
         Trail trail = service.updateTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicName,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail,
+                req.path("CloudWatchLogsLogGroupArn").asText(null), req.path("CloudWatchLogsRoleArn").asText(null));
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());
@@ -120,6 +136,7 @@ public class CloudTrailJsonHandler {
         resp.put("TrailARN", trail.trailArn());
         resp.put("LogFileValidationEnabled", trail.logFileValidationEnabled());
         resp.put("IsOrganizationTrail", trail.isOrganizationTrail());
+        putCloudWatchLogs(resp, trail);
         return Response.ok(resp).build();
     }
 
@@ -140,6 +157,10 @@ public class CloudTrailJsonHandler {
         if (hasBasic && hasAdvanced) {
             throw new AwsException("InvalidEventSelectorsException",
                     "EventSelectors and AdvancedEventSelectors are mutually exclusive on a single trail.", 400);
+        }
+        if (!hasBasic && !hasAdvanced) {
+            throw new AwsException("InvalidEventSelectorsException",
+                    "Specify a valid number of event selectors (1 to 5) for a trail.", 400);
         }
 
         ObjectNode resp = mapper.createObjectNode();
@@ -216,13 +237,97 @@ public class CloudTrailJsonHandler {
         if (status.stopLoggingTime() != null) {
             resp.put("StopLoggingTime", status.stopLoggingTime() / 1000.0);
         }
+        CloudTrailEntry.ChannelStatus channels = status.channels();
+        putStatus(resp, "LatestCloudWatchLogsDeliveryTime", channels.cloudWatchLogsDeliveryTime(),
+                "LatestCloudWatchLogsDeliveryError", channels.cloudWatchLogsDeliveryError());
+        putStatus(resp, "LatestNotificationTime", channels.notificationTime(),
+                "LatestNotificationError", channels.notificationError());
+        putStatus(resp, "LatestDigestDeliveryTime", channels.digestDeliveryTime(),
+                "LatestDigestDeliveryError", channels.digestDeliveryError());
+        return Response.ok(resp).build();
+    }
+
+    private static void putStatus(ObjectNode resp, String timeField, Long time, String errorField, String error) {
+        if (time != null) {
+            resp.put(timeField, time / 1000.0);
+        }
+        if (error != null) {
+            resp.put(errorField, error);
+        }
+    }
+
+    private static void putCloudWatchLogs(ObjectNode resp, Trail trail) {
+        if (trail.cloudWatchLogsLogGroupArn() != null) {
+            resp.put("CloudWatchLogsLogGroupArn", trail.cloudWatchLogsLogGroupArn());
+            resp.put("CloudWatchLogsRoleArn", trail.cloudWatchLogsRoleArn());
+        }
+    }
+
+    private Response listPublicKeys(JsonNode req, String region) {
+        ObjectNode resp = mapper.createObjectNode();
+        ArrayNode keys = resp.putArray("PublicKeyList");
+        for (CloudTrailDigestWriter.DigestKey key : digestWriter.publicKeys(regionResolver.getAccountId(), region,
+                timestamp(req.get("StartTime")), timestamp(req.get("EndTime")))) {
+            keys.addObject()
+                    .put("Value", key.publicKey())
+                    .put("ValidityStartTime", BigDecimal.valueOf(key.validityStart()).movePointLeft(3))
+                    .put("ValidityEndTime", BigDecimal.valueOf(key.validityEnd()).movePointLeft(3))
+                    .put("Fingerprint", key.fingerprint());
+        }
         return Response.ok(resp).build();
     }
 
     private Response lookupEvents(JsonNode req, String region) {
+        JsonNode attributes = req.path("LookupAttributes");
+        if (attributes.size() > 1) {
+            throw new AwsException("InvalidLookupAttributesException",
+                    "You cannot specify more than one lookup attribute.", 400);
+        }
+        JsonNode attribute = attributes.path(0);
         ObjectNode resp = mapper.createObjectNode();
-        resp.putArray("Events");
+        ArrayNode events = resp.putArray("Events");
+        if ("insight".equals(req.path("EventCategory").asText())) {
+            return Response.ok(resp).build();
+        }
+        EventHistoryStore.Page page = eventHistory.lookup(regionResolver.getAccountId(), region,
+                attribute.path("AttributeKey").asText(null), attribute.path("AttributeValue").asText(null),
+                timestamp(req.get("StartTime")), timestamp(req.get("EndTime")),
+                req.has("MaxResults") ? req.path("MaxResults").asInt() : null,
+                req.path("NextToken").asText(null));
+        for (HistoryEvent event : page.events()) {
+            ObjectNode entry = events.addObject();
+            entry.put("EventId", event.eventId());
+            entry.put("EventName", event.eventName());
+            entry.put("ReadOnly", String.valueOf(event.readOnly()));
+            if (event.accessKeyId() != null) {
+                entry.put("AccessKeyId", event.accessKeyId());
+            }
+            entry.put("EventTime", BigDecimal.valueOf(event.eventTimeMillis()).movePointLeft(3));
+            entry.put("EventSource", event.eventSource());
+            if (event.username() != null) {
+                entry.put("Username", event.username());
+            }
+            ArrayNode resources = entry.putArray("Resources");
+            for (HistoryEvent.Resource resource : event.resources()) {
+                resources.addObject().put("ResourceType", resource.resourceType())
+                        .put("ResourceName", resource.resourceName());
+            }
+            entry.put("CloudTrailEvent", event.cloudTrailEvent());
+        }
+        if (page.nextToken() != null) {
+            resp.put("NextToken", page.nextToken());
+        }
         return Response.ok(resp).build();
+    }
+
+    private static Instant timestamp(JsonNode value) {
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (value.isNumber()) {
+            return Instant.ofEpochMilli(value.decimalValue().movePointRight(3).longValue());
+        }
+        return Instant.parse(value.asText());
     }
 
     private Response addTags(JsonNode req) {

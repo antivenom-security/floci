@@ -20,5 +20,7 @@ public record Trail(
         @JsonProperty("LogFileValidationEnabled") boolean logFileValidationEnabled,
         @JsonProperty("HasCustomEventSelectors") boolean hasCustomEventSelectors,
         @JsonProperty("HasInsightSelectors") boolean hasInsightSelectors,
-        @JsonProperty("IsOrganizationTrail") boolean isOrganizationTrail) {
+        @JsonProperty("IsOrganizationTrail") boolean isOrganizationTrail,
+        @JsonProperty("CloudWatchLogsLogGroupArn") String cloudWatchLogsLogGroupArn,
+        @JsonProperty("CloudWatchLogsRoleArn") String cloudWatchLogsRoleArn) {
 }

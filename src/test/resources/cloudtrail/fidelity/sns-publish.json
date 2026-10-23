@@ -1,0 +1,35 @@
+{
+  "event": {
+    "eventSource": "sns.amazonaws.com",
+    "eventName": "Publish",
+    "awsRegion": "us-west-2",
+    "eventTime": "2024-05-14T08:03:12Z",
+    "userIdentity": {"type": "Root", "principalId": "111122223333", "arn": "arn:aws:iam::111122223333:root", "accountId": "111122223333", "accessKeyId": "AKIAEXAMPLEROOTKEY01"},
+    "sourceIPAddress": "192.0.2.77",
+    "userAgent": "aws-sdk-java/2.25.6 Linux/6.1 OpenJDK_64-Bit_Server_VM/21.0.2",
+    "requestID": "c1d2e3f4-a5b6-4c7d-8e9f-a0b1c2d3e4f5",
+    "recipientAccountId": "111122223333"
+  },
+  "input": {"TopicArn": "arn:aws:sns:us-west-2:111122223333:ExampleTopic", "Message": "order 1234 shipped", "Subject": "Order update"},
+  "output": {"MessageId": "5b8e2f0a-9c1d-5e3f-a4b6-c7d8e9f0a1b2"},
+  "record": {
+    "eventVersion": "1.11",
+    "userIdentity": {"type": "Root", "principalId": "111122223333", "arn": "arn:aws:iam::111122223333:root", "accountId": "111122223333", "accessKeyId": "AKIAEXAMPLEROOTKEY01"},
+    "eventTime": "2024-05-14T08:03:12Z",
+    "eventSource": "sns.amazonaws.com",
+    "eventName": "Publish",
+    "awsRegion": "us-west-2",
+    "sourceIPAddress": "192.0.2.77",
+    "userAgent": "aws-sdk-java/2.25.6 Linux/6.1 OpenJDK_64-Bit_Server_VM/21.0.2",
+    "requestParameters": {"topicArn": "arn:aws:sns:us-west-2:111122223333:ExampleTopic", "message": "HIDDEN_DUE_TO_SECURITY_REASONS", "subject": "HIDDEN_DUE_TO_SECURITY_REASONS"},
+    "responseElements": {"messageId": "5b8e2f0a-9c1d-5e3f-a4b6-c7d8e9f0a1b2"},
+    "requestID": "c1d2e3f4-a5b6-4c7d-8e9f-a0b1c2d3e4f5",
+    "eventID": "<eventID>",
+    "readOnly": false,
+    "resources": [{"accountId": "111122223333", "type": "AWS::SNS::Topic", "ARN": "arn:aws:sns:us-west-2:111122223333:ExampleTopic"}],
+    "eventType": "AwsApiCall",
+    "managementEvent": false,
+    "recipientAccountId": "111122223333",
+    "eventCategory": "Data"
+  }
+}

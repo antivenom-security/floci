@@ -1089,6 +1089,14 @@ public interface EmulatorConfig {
     interface Route53ResolverServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** How often query logs are written to S3 destinations. AWS publishes about every 5 minutes. */
+        @WithDefault("300")
+        int queryLogS3IntervalSeconds();
+
+        /** How often query logs are written to CloudWatch Logs destinations. */
+        @WithDefault("60")
+        int queryLogCloudwatchIntervalSeconds();
     }
 
     interface NetworkFirewallServiceConfig {
@@ -1220,11 +1228,44 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        /** How often the writer flushes pending records into the destination
-         *  bucket. Real AWS delivers data events with ~5-minute lag; the
-         *  default here is 60s so dev/CI feedback loops stay fast. */
-        @WithDefault("60")
+        /** How often the writer delivers pending records, AWS's "about every 5 minutes". */
+        @WithDefault("300")
         int flushIntervalSeconds();
+
+        /** How often a trail with log file validation writes a digest file, AWS's hourly. */
+        @WithDefault("3600")
+        int digestIntervalSeconds();
+
+        CloudTrailManagementEventsConfig managementEvents();
+
+        CloudTrailEventHistoryConfig eventHistory();
+
+        /** LookupEvents calls allowed per second per account and region, AWS's 2 TPS. */
+        @WithDefault("2")
+        int lookupRateLimitPerSecond();
+
+        /** Record the first X-Forwarded-For address as sourceIPAddress instead of the TCP peer. */
+        @WithDefault("false")
+        boolean trustForwardedFor();
+
+        /** Seconds before a covered event reaches EventBridge; AWS documents no delay. */
+        @WithDefault("0")
+        int eventbridgeDelaySeconds();
+    }
+
+    interface CloudTrailManagementEventsConfig {
+        /** Record management events into event history and route them to trails. */
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CloudTrailEventHistoryConfig {
+        @WithDefault("90")
+        int retentionDays();
+
+        /** Oldest events are evicted past this many, across all accounts and regions. */
+        @WithDefault("20000")
+        int maxEvents();
     }
 
     interface ResourceExplorer2ServiceConfig {
@@ -3329,6 +3370,28 @@ public interface EmulatorConfig {
 
         /** Docker-network backing for VPCs and subnets. */
         VpcNetworksConfig vpcNetworks();
+
+        /** VPC Flow Logs delivery. */
+        FlowLogsConfig flowLogs();
+    }
+
+    interface FlowLogsConfig {
+        /**
+         * {@code observed} records real traffic at security-group enforcement points,
+         * {@code synthetic} generates random records, {@code off} delivers nothing. Unset means
+         * observed when security-group enforcement is enabled and synthetic otherwise.
+         *
+         * Env var: FLOCI_SERVICES_EC2_FLOW_LOGS_MODE
+         */
+        Optional<String> mode();
+
+        /** Seconds between conntrack and reject-counter polls of each managed ENI. */
+        @WithDefault("10")
+        int captureTickSeconds();
+
+        /** Seconds between flow-log files written to an S3 destination. */
+        @WithDefault("300")
+        int s3PublishIntervalSeconds();
     }
 
     /**

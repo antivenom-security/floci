@@ -1,0 +1,35 @@
+{
+  "event": {
+    "eventSource": "kms.amazonaws.com",
+    "eventName": "Decrypt",
+    "awsRegion": "us-west-2",
+    "eventTime": "2024-07-02T14:40:05Z",
+    "userIdentity": {"type": "AssumedRole", "principalId": "AROAEXAMPLEROLEID123:app-session", "arn": "arn:aws:sts::111122223333:assumed-role/AppRole/app-session", "accountId": "111122223333", "accessKeyId": "ASIAEXAMPLESESSION01", "sessionContext": {"sessionIssuer": {"type": "Role", "principalId": "AROAEXAMPLEROLEID123", "arn": "arn:aws:iam::111122223333:role/AppRole", "accountId": "111122223333", "userName": "AppRole"}, "webIdFederationData": {}, "attributes": {"creationDate": "2024-07-02T14:30:00Z", "mfaAuthenticated": "false"}}},
+    "sourceIPAddress": "10.0.1.15",
+    "userAgent": "aws-sdk-go-v2/1.26.1 os/linux lang/go#1.22.2",
+    "requestID": "e0f1a2b3-c4d5-4e6f-9a0b-1c2d3e4f5a6b",
+    "recipientAccountId": "111122223333"
+  },
+  "input": {"CiphertextBlob": "AQIDAHhBExampleCiphertext==", "EncryptionContext": {"Department": "IT"}, "EncryptionAlgorithm": "SYMMETRIC_DEFAULT"},
+  "output": {"KeyId": "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab", "Plaintext": "c2VjcmV0", "EncryptionAlgorithm": "SYMMETRIC_DEFAULT"},
+  "record": {
+    "eventVersion": "1.11",
+    "userIdentity": {"type": "AssumedRole", "principalId": "AROAEXAMPLEROLEID123:app-session", "arn": "arn:aws:sts::111122223333:assumed-role/AppRole/app-session", "accountId": "111122223333", "accessKeyId": "ASIAEXAMPLESESSION01", "sessionContext": {"sessionIssuer": {"type": "Role", "principalId": "AROAEXAMPLEROLEID123", "arn": "arn:aws:iam::111122223333:role/AppRole", "accountId": "111122223333", "userName": "AppRole"}, "webIdFederationData": {}, "attributes": {"creationDate": "2024-07-02T14:30:00Z", "mfaAuthenticated": "false"}}},
+    "eventTime": "2024-07-02T14:40:05Z",
+    "eventSource": "kms.amazonaws.com",
+    "eventName": "Decrypt",
+    "awsRegion": "us-west-2",
+    "sourceIPAddress": "10.0.1.15",
+    "userAgent": "aws-sdk-go-v2/1.26.1 os/linux lang/go#1.22.2",
+    "requestParameters": {"encryptionContext": {"Department": "IT"}, "encryptionAlgorithm": "SYMMETRIC_DEFAULT"},
+    "responseElements": null,
+    "requestID": "e0f1a2b3-c4d5-4e6f-9a0b-1c2d3e4f5a6b",
+    "eventID": "<eventID>",
+    "readOnly": true,
+    "resources": [{"accountId": "111122223333", "type": "AWS::KMS::Key", "ARN": "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"}],
+    "eventType": "AwsApiCall",
+    "managementEvent": true,
+    "recipientAccountId": "111122223333",
+    "eventCategory": "Management"
+  }
+}

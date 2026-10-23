@@ -1,7 +1,12 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
+import io.github.hectorvent.floci.services.ec2.FlowLogService.FlowEni;
+import io.github.hectorvent.floci.services.ec2.FlowLogService.FlowKey;
+import io.github.hectorvent.floci.services.ec2.FlowLogService.FlowObservation;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
@@ -13,12 +18,14 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.GZIPInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -26,7 +33,10 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class FlowLogServiceTest {
@@ -44,7 +54,8 @@ class FlowLogServiceTest {
         when(ec2Service.callerAccountId()).thenReturn(accountId);
         when(ec2Service.describeInstances(any(), any(), anyMap())).thenReturn(List.of());
         when(ec2Service.endpointNetworkInterfaces(any())).thenReturn(List.of());
-        return new FlowLogService(ec2Service, mock(S3Service.class), new InMemoryStorage<>());
+        return new FlowLogService(ec2Service, mock(S3Service.class), mock(CloudWatchLogsService.class),
+                new InMemoryStorage<>(), "synthetic", 300);
     }
 
     @Test
@@ -133,54 +144,40 @@ class FlowLogServiceTest {
         }
     }
 
-    /**
-     * A field this emulator carries no value for keeps its column and reads "-".
-     *
-     * <p>Dropping it would shift every later value one place left against the header the caller
-     * asked for, which is worse than saying the field does not apply.
-     */
+    /** A version 7 field the synthetic generator has no value for keeps its column as a dash. */
     @Test
-    void anUnsupportedFieldKeepsItsColumnAsADash() throws Exception {
-        List<String> lines = deliver("${srcaddr} ${ecs-cluster-arn} ${action}");
+    void aVersion7FieldKeepsItsColumnAsADashAndReportsVersion7() throws Exception {
+        List<String> lines = deliver("${version} ${ecs-cluster-arn} ${action}");
 
-        assertEquals("srcaddr ecs-cluster-arn action", lines.get(0));
+        assertEquals("version ecs-cluster-arn action", lines.get(0));
         for (String row : records(lines)) {
-            assertEquals("-", row.split(" ")[1], "unsupported field is not a dash: " + row);
+            assertEquals("7 - ACCEPT", row);
         }
     }
 
-    /**
-     * A token spelled in a way this emulator does not recognise still holds its column.
-     *
-     * <p>The token pattern once matched lowercase names only, so a format naming ${DSTADDR} lost
-     * that column from both the header and every row, delivering a narrower file than the caller
-     * asked for.
-     */
+    /** EC2-CFL: a LogFormat naming a field AWS does not define, or a later version's, is refused. */
     @Test
-    void anUnrecognisedTokenSpellingKeepsItsColumn() throws Exception {
-        List<String> lines = deliver("${srcaddr} ${DSTADDR} ${action}");
+    void anUnknownFieldIsRejected() {
+        AwsException e = assertThrows(AwsException.class, () -> flowLogService.createFlowLog("us-east-1",
+                "vpc-123", "VPC", "ALL", "s3", "arn:aws:s3:::flow-bucket", null, "${srcaddr} ${DSTADDR}", 600));
 
-        assertEquals("srcaddr DSTADDR action", lines.get(0));
-        for (String row : records(lines)) {
-            assertEquals(3, row.split(" ").length, "row does not match the header: " + row);
-            assertEquals("-", row.split(" ")[1], "unrecognised token is not a dash: " + row);
-        }
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertTrue(e.getMessage().contains("${DSTADDR}"), e.getMessage());
     }
 
-    /**
-     * A field outside the version table counts as the highest version that table defines.
-     *
-     * <p>The table is complete through version 5, so an unlisted field belongs to a later one.
-     * Counting it as version 2 would label a record that plainly is not a version 2 record.
-     */
     @Test
-    void anUnlistedFieldDoesNotReportVersionTwo() throws Exception {
-        List<String> lines = deliver("${version} ${ecs-cluster-arn}");
-
-        assertEquals("version ecs-cluster-arn", lines.get(0));
-        for (String row : records(lines)) {
-            assertEquals("5", row.split(" ")[0], "version fell back to 2: " + row);
-        }
+    void firehoseAnOddIntervalAndParquetAreRefused() {
+        assertEquals("UnsupportedOperation", assertThrows(AwsException.class, () -> flowLogService.createFlowLog(
+                "us-east-1", "vpc-123", "VPC", "ALL", "kinesis-data-firehose", "arn:aws:firehose:us-east-1:000000000000:deliverystream/x",
+                null, null, 600)).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> flowLogService.createFlowLog(
+                "us-east-1", "vpc-123", "VPC", "ALL", "s3", "arn:aws:s3:::b", null, null, 120)).getErrorCode());
+        assertEquals("UnsupportedOperation", assertThrows(AwsException.class, () -> flowLogService.createFlowLog(
+                "us-east-1", "vpc-123", "VPC", "ALL", "s3", "arn:aws:s3:::b", null, null, null, 600,
+                "parquet", false, false)).getErrorCode());
+        assertEquals("InvalidParameter", assertThrows(AwsException.class, () -> flowLogService.createFlowLog(
+                "us-east-1", "vpc-123", "VPC", "ALL", "cloud-watch-logs", null, "flows", null, null, 600,
+                null, false, false)).getErrorCode());
     }
 
     /**
@@ -219,8 +216,8 @@ class FlowLogServiceTest {
                 .thenReturn(List.of(reservation(region)));
         when(ec2Service.endpointNetworkInterfaces(any())).thenReturn(List.of());
         S3Service s3Service = mock(S3Service.class);
-        FlowLogService service =
-                new FlowLogService(ec2Service, s3Service, new InMemoryStorage<>());
+        FlowLogService service = new FlowLogService(ec2Service, s3Service, mock(CloudWatchLogsService.class),
+                new InMemoryStorage<>(), "synthetic", 300);
 
         FlowLog fl = service.createFlowLog(region, "vpc-123", "VPC", "ALL", "s3",
                 "arn:aws:s3:::flow-bucket", null, logFormat, 600);
@@ -262,5 +259,147 @@ class FlowLogServiceTest {
         assertEquals("bkt", FlowLogService.bucketFromArn("arn:aws:s3:::bkt/logs:2024/"));
         assertEquals("bkt", FlowLogService.bucketFromArn("arn:aws-cn:s3:::bkt"));
         assertEquals("bkt", FlowLogService.bucketFromArn("bkt/prefix"));
+    }
+
+    private static final Instant T0 = Instant.ofEpochSecond(1_700_000_000);
+
+    private static FlowLogService observed(Ec2Service ec2Service, S3Service s3Service, CloudWatchLogsService logs) {
+        when(ec2Service.callerAccountId()).thenReturn("000000000000");
+        return new FlowLogService(ec2Service, s3Service, logs, new InMemoryStorage<>(), "observed", 0);
+    }
+
+    private static FlowEni eni(String eniId, String vpcId, Map<String, String> ecs) {
+        return new FlowEni(eniId, "000000000000", "us-east-1", vpcId, "subnet-1", null, "us-east-1a", ecs);
+    }
+
+    @Test
+    void observedModeNeverRunsTheGenerator() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        S3Service s3Service = mock(S3Service.class);
+        FlowLogService service = observed(ec2Service, s3Service, mock(CloudWatchLogsService.class));
+
+        service.createFlowLog("us-east-1", "vpc-1", "VPC", "ALL", "s3", "arn:aws:s3:::bkt", null, null, 60);
+
+        verifyNoInteractions(s3Service);
+        verify(ec2Service, never()).describeInstances(any(), any(), anyMap());
+    }
+
+    @Test
+    void anObservedWindowDeliversAggregatedRecordsAndNodataForIdleEnis() throws Exception {
+        S3Service s3Service = mock(S3Service.class);
+        FlowLogService service = observed(mock(Ec2Service.class), s3Service, mock(CloudWatchLogsService.class));
+        FlowLog fl = service.createFlowLog("us-east-1", "vpc-1", "VPC", "ALL", "s3", "arn:aws:s3:::bkt/pre", null,
+                "${version} ${interface-id} ${srcaddr} ${dstaddr} ${packets} ${start} ${end} ${action} "
+                        + "${log-status} ${ecs-task-id}", 60);
+        List<FlowEni> enis = List.of(eni("eni-a", "vpc-1", Map.of("ecs-task-id", "t1")),
+                eni("eni-b", "vpc-1", Map.of()), eni("eni-c", "vpc-2", Map.of()));
+        FlowKey key = new FlowKey("eni-a", "10.0.0.5", "10.0.0.6", 40000, 8080, 6, "egress", "ACCEPT", null, "1");
+
+        service.ingest(T0, enis, List.of());
+        service.ingest(T0.plusSeconds(10), enis, List.of(new FlowObservation(key, 3, 180, 2)));
+        service.ingest(T0.plusSeconds(20), enis, List.of(new FlowObservation(key, 2, 120, 1)));
+        service.ingest(T0.plusSeconds(60), enis, List.of());
+
+        ArgumentCaptor<String> s3Key = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("bkt"), s3Key.capture(), body.capture(), anyString(), any(Map.class));
+        assertTrue(s3Key.getValue().matches("pre/AWSLogs/000000000000/vpcflowlogs/us-east-1/2023/11/14/"
+                + "000000000000_vpcflowlogs_us-east-1_" + fl.getFlowLogId() + "_20231114T2214Z_[0-9a-f]{8}\\.log\\.gz"),
+                s3Key.getValue());
+        assertEquals(List.of(
+                "version interface-id srcaddr dstaddr packets start end action log-status ecs-task-id",
+                "7 eni-a 10.0.0.5 10.0.0.6 5 1700000010 1700000020 ACCEPT OK t1",
+                "7 eni-b - - - 1700000000 1700000060 - NODATA -"), List.of(gunzip(body.getValue()).split("\n")));
+    }
+
+    @Test
+    void cloudWatchGetsOneStreamPerEniStampedAtTheRecordStart() {
+        CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
+        FlowLogService service = observed(mock(Ec2Service.class), mock(S3Service.class), logs);
+        service.createFlowLog("us-east-1", "vpc-1", "VPC", "REJECT", "cloud-watch-logs",
+                "arn:aws:logs:us-east-1:000000000000:log-group:flows:*", null, "arn:aws:iam::000000000000:role/r",
+                null, 60, null, false, false);
+        List<FlowEni> enis = List.of(eni("eni-a", "vpc-1", Map.of()));
+        FlowKey rejected = new FlowKey("eni-a", "10.0.0.6", "10.0.0.5", 40001, 9090, 6, "ingress", "REJECT", null, null);
+        FlowKey accepted = new FlowKey("eni-a", "10.0.0.6", "10.0.0.5", 40002, 8080, 6, "ingress", "ACCEPT", null, null);
+
+        service.ingest(T0, enis, List.of());
+        service.ingest(T0.plusSeconds(10), enis,
+                List.of(new FlowObservation(rejected, 1, 60, 2), new FlowObservation(accepted, 4, 400, 2)));
+        service.ingest(T0.plusSeconds(60), enis, List.of());
+
+        verify(logs).createLogGroupForAccount("000000000000", "flows", null, Map.of(), "us-east-1");
+        verify(logs).createLogStreamForAccount("000000000000", "flows", "eni-a-reject", "us-east-1");
+        ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
+        verify(logs).putLogEventsForAccount(eq("000000000000"), eq("flows"), eq("eni-a-reject"),
+                events.capture(), eq("us-east-1"));
+        assertEquals(List.of(Map.of("timestamp", 1_700_000_010_000L, "message",
+                "2 000000000000 eni-a 10.0.0.6 10.0.0.5 40001 9090 6 1 60 1700000010 1700000010 REJECT OK")),
+                events.getValue());
+    }
+
+    @Test
+    void hiveAndHourPartitionsFollowTheS3Layout() {
+        FlowLog fl = new FlowLog();
+        fl.setFlowLogId("fl-1");
+        fl.setAccountId("000000000000");
+        fl.setRegion("us-east-1");
+        fl.setLogDestination("arn:aws:s3:::bkt");
+        fl.setHiveCompatiblePartitions(true);
+        fl.setPerHourPartition(true);
+
+        assertTrue(flowLogService.s3Key(fl, T0).startsWith("AWSLogs/aws-account-id=000000000000/aws-service=vpcflowlogs/"
+                + "aws-region=us-east-1/year=2023/month=11/day=14/hour=22/000000000000_vpcflowlogs_us-east-1_fl-1_"
+                + "20231114T2213Z_"));
+    }
+
+    private static final String FORMAT = "${interface-id} ${packets} ${action} ${log-status}";
+
+    @Test
+    void rowsAFailedS3WriteCouldNotDeliverGoInTheNextFile() throws Exception {
+        S3Service s3Service = mock(S3Service.class);
+        when(s3Service.putObject(eq("bkt"), anyString(), any(byte[].class), anyString(), any(Map.class)))
+                .thenThrow(new RuntimeException("NoSuchBucket")).thenReturn(null);
+        FlowLogService service = observed(mock(Ec2Service.class), s3Service, mock(CloudWatchLogsService.class));
+        service.createFlowLog("us-east-1", "vpc-1", "VPC", "ALL", "s3", "arn:aws:s3:::bkt", null, FORMAT, 60);
+        List<FlowEni> enis = List.of(eni("eni-a", "vpc-1", Map.of()));
+        FlowKey key = new FlowKey("eni-a", "10.0.0.5", "10.0.0.6", 40000, 8080, 6, "egress", "ACCEPT", null, "1");
+
+        service.ingest(T0, enis, List.of());
+        service.ingest(T0.plusSeconds(10), enis, List.of(new FlowObservation(key, 3, 180, 2)));
+        service.ingest(T0.plusSeconds(60), enis, List.of());
+        service.ingest(T0.plusSeconds(70), enis, List.of());
+
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service, times(2)).putObject(eq("bkt"), anyString(), body.capture(),
+                anyString(), any(Map.class));
+        assertEquals(List.of(FORMAT.replaceAll("[${}]", ""), "eni-a 3 ACCEPT OK"),
+                List.of(gunzip(body.getAllValues().get(1)).split("\n")));
+    }
+
+    @Test
+    void shutdownDeliversTheOpenWindow() throws Exception {
+        S3Service s3Service = mock(S3Service.class);
+        FlowLogService service = observed(mock(Ec2Service.class), s3Service, mock(CloudWatchLogsService.class));
+        service.createFlowLog("us-east-1", "vpc-1", "VPC", "ALL", "s3", "arn:aws:s3:::bkt", null, FORMAT, 600);
+        List<FlowEni> enis = List.of(eni("eni-a", "vpc-1", Map.of()));
+        FlowKey key = new FlowKey("eni-a", "10.0.0.5", "10.0.0.6", 40000, 8080, 6, "egress", "ACCEPT", null, "1");
+        service.ingest(T0, enis, List.of());
+        service.ingest(T0.plusSeconds(10), enis, List.of(new FlowObservation(key, 3, 180, 2)));
+
+        service.flushOpenWindows(T0.plusSeconds(20));
+
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("bkt"), anyString(), body.capture(), anyString(), any(Map.class));
+        assertEquals("eni-a 3 ACCEPT OK", gunzip(body.getValue()).split("\n")[1]);
+    }
+
+    /** DescribeFlowLogs reports the group's ARN as LogDestination when only LogGroupName was given. */
+    @Test
+    void aLogGroupNameBecomesTheLogDestinationArn() {
+        FlowLog fl = flowLogService.createFlowLog("us-east-1", "vpc-123", "VPC", "ALL", "cloud-watch-logs", null,
+                "flows", "arn:aws:iam::000000000000:role/r", null, 600, null, false, false);
+
+        assertEquals("arn:aws:logs:us-east-1:000000000000:log-group:flows", fl.getLogDestination());
     }
 }

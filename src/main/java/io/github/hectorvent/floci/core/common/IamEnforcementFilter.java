@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailCaptureFilter;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.cloudtrail.record.TlsDetails;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.IamAuthorizedActions;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
@@ -47,7 +49,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -1420,19 +1421,16 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
             String userAgent = null;
             String sourceIp = null;
+            TlsDetails tlsDetails = null;
             try {
                 var rc = currentVertxRequest.getCurrent();
                 if (rc != null) {
                     var req = rc.request();
                     if (req != null) {
+                        tlsDetails = TlsDetails.of(req);
                         userAgent = req.getHeader("User-Agent");
-                        String fwd = req.getHeader("X-Forwarded-For");
-                        if (fwd != null && !fwd.isBlank()) {
-                            int comma = fwd.indexOf(',');
-                            sourceIp = (comma > 0 ? fwd.substring(0, comma) : fwd).trim();
-                        } else if (req.remoteAddress() != null) {
-                            sourceIp = req.remoteAddress().host();
-                        }
+                        sourceIp = CloudTrailCaptureFilter.sourceIp(req,
+                                config.services().cloudtrail().trustForwardedFor());
                     }
                 }
             } catch (Exception e) {
@@ -1450,6 +1448,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     .errorCode("AccessDenied")
                     .errorMessage(denyMessage)
                     .eventTimeMillis(System.currentTimeMillis())
+                    .requestId(requestContext.getRequestId())
+                    .tlsDetails(tlsDetails)
                     .build());
         } catch (RuntimeException e) {
             LOG.warnv(e, "CloudTrail denial emission failed for {0} on {1}", eventName, resource);
@@ -1694,7 +1694,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     .elem("Code", code)
                     .elem("Message", message)
                   .end("Error")
-                  .elem("RequestId", UUID.randomUUID().toString())
+                  .elem("RequestId", RequestIdFilter.current())
                 .end("ErrorResponse")
                 .build();
         return Response.status(status).type(MediaType.APPLICATION_XML).entity(xml).build();
@@ -1721,7 +1721,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (resourcePath != null && !resourcePath.isBlank()) {
             xml.elem("Resource", resourcePath);
         }
-        xml.elem("RequestId", UUID.randomUUID().toString())
+        xml.elem("RequestId", RequestIdFilter.current())
            .end("Error");
         return Response.status(status).type(MediaType.APPLICATION_XML).entity(xml.build()).build();
     }

@@ -1,0 +1,25 @@
+{
+  "_source": "Hand-maintained. The operations whose records carry resources, and the services whose records carry apiVersion. AssumeRole: CloudTrail event examples; KMS: https://docs.aws.amazon.com/kms/latest/developerguide/ct-decrypt.html; logs apiVersion: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/logging_cw_api_calls.html. An ARN is read from requestParameters, then from responseElements before read-only nulling.",
+  "resources": {
+    "sts.amazonaws.com": {
+      "AssumeRole": {"type": "AWS::IAM::Role", "arnMember": "roleArn"}
+    },
+    "kms.amazonaws.com": {
+      "Decrypt": {"type": "AWS::KMS::Key", "arnMember": "keyId"},
+      "Encrypt": {"type": "AWS::KMS::Key", "arnMember": "keyId"},
+      "GenerateDataKey": {"type": "AWS::KMS::Key", "arnMember": "keyId"},
+      "ReEncrypt": {"type": "AWS::KMS::Key", "arnMember": "keyId"},
+      "Sign": {"type": "AWS::KMS::Key", "arnMember": "keyId"},
+      "Verify": {"type": "AWS::KMS::Key", "arnMember": "keyId"}
+    },
+    "sns.amazonaws.com": {
+      "Publish": {"type": "AWS::SNS::Topic", "arnMember": "topicArn"},
+      "Subscribe": {"type": "AWS::SNS::Topic", "arnMember": "topicArn"},
+      "SetTopicAttributes": {"type": "AWS::SNS::Topic", "arnMember": "topicArn"},
+      "DeleteTopic": {"type": "AWS::SNS::Topic", "arnMember": "topicArn"}
+    }
+  },
+  "apiVersions": {
+    "logs.amazonaws.com": "20140328"
+  }
+}

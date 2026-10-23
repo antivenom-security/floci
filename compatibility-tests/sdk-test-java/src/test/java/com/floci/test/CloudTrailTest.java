@@ -5,6 +5,7 @@ import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.cloudtrail.model.CreateTrailResponse;
 import software.amazon.awssdk.services.cloudtrail.model.DescribeTrailsResponse;
 import software.amazon.awssdk.services.cloudtrail.model.GetTrailStatusResponse;
+import software.amazon.awssdk.services.cloudtrail.model.ReadWriteType;
 import software.amazon.awssdk.services.cloudtrail.model.Trail;
 import software.amazon.awssdk.services.cloudtrail.model.TrailNotFoundException;
 import software.amazon.awssdk.services.cloudtrail.model.UpdateTrailResponse;
@@ -98,7 +99,8 @@ class CloudTrailTest {
     @Test
     @Order(5)
     void putEventSelectorsAcceptsTrailName() {
-        cloudTrail.putEventSelectors(r -> r.trailName(trailName));
+        cloudTrail.putEventSelectors(r -> r.trailName(trailName)
+                .eventSelectors(s -> s.readWriteType(ReadWriteType.ALL).includeManagementEvents(true)));
     }
 
     @Test

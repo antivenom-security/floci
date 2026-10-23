@@ -165,7 +165,7 @@ public class EventBridgeHandler {
         String busName = request.path("EventBusName").asText(null);
         String eventPattern = request.path("EventPattern").asText(null);
         String scheduleExpression = request.path("ScheduleExpression").asText(null);
-        RuleState state = parseRuleState(request.path("State").asText(null));
+        RuleState state = RuleState.fromValue(request.path("State").asText(null));
         String description = request.path("Description").asText(null);
         String roleArn = request.path("RoleArn").asText(null);
         Map<String, String> tags = parseTagsArray(request.path("Tags"));
@@ -782,16 +782,6 @@ public class EventBridgeHandler {
             node.put("RoleArn", rule.getRoleArn());
         }
         return node;
-    }
-
-    private RuleState parseRuleState(String state) {
-        if (state == null || state.isBlank()) {
-            return RuleState.ENABLED;
-        }
-        return switch (state.toUpperCase()) {
-            case "DISABLED" -> RuleState.DISABLED;
-            default -> RuleState.ENABLED;
-        };
     }
 
     private Map<String, String> parseTagsArray(JsonNode tagsNode) {

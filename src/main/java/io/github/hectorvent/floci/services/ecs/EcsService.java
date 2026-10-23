@@ -2340,6 +2340,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return Optional.empty();
     }
 
+    /** The task an awsvpc ENI belongs to, which flow logs attribute that ENI's traffic to. */
+    public Optional<EcsTask> findTaskByNetworkInterface(String eniId) {
+        return tasks.values().stream()
+                .filter(task -> eniId.equals(task.getNetworkInterfaceId()))
+                .findFirst();
+    }
+
     /** The task's definition, or null when it has since been deleted. */
     private TaskDefinition taskDefinitionOf(EcsTask task) {
         try {

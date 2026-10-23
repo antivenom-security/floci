@@ -161,7 +161,7 @@ public class RuleScheduler implements Resettable {
             return;
         }
 
-        if (data.rule.getState() != RuleState.ENABLED) {
+        if (data.rule.getState() == RuleState.DISABLED) {
             LOG.debugv("Rule {0} is disabled, skipping tick", data.rule.getName());
             return;
         }

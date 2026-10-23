@@ -5,11 +5,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -25,11 +29,14 @@ public class Route53ResolverJsonHandler {
 
     private final Route53ResolverService service;
     private final ObjectMapper objectMapper;
+    private final Ec2Service ec2Service;
 
     @Inject
-    public Route53ResolverJsonHandler(Route53ResolverService service, ObjectMapper objectMapper) {
+    public Route53ResolverJsonHandler(Route53ResolverService service, ObjectMapper objectMapper,
+                                      Ec2Service ec2Service) {
         this.service = service;
         this.objectMapper = objectMapper;
+        this.ec2Service = ec2Service;
     }
 
     public Response handle(String action, JsonNode request, String region, String accountId) {
@@ -73,6 +80,29 @@ public class Route53ResolverJsonHandler {
                         service.getResolverRuleAssociation(text(request, "ResolverRuleAssociationId")));
                 case "ListResolverRuleAssociations" -> handleListResolverRuleAssociations();
 
+                case "CreateResolverQueryLogConfig" -> queryLogConfigResponse(
+                        service.createResolverQueryLogConfig(request, region, accountId));
+                case "GetResolverQueryLogConfig" -> queryLogConfigResponse(
+                        service.getResolverQueryLogConfig(text(request, "ResolverQueryLogConfigId")));
+                case "ListResolverQueryLogConfigs" -> listResponse("ResolverQueryLogConfigs",
+                        service.listResolverQueryLogConfigs());
+                case "DeleteResolverQueryLogConfig" -> queryLogConfigResponse(
+                        service.deleteResolverQueryLogConfig(text(request, "ResolverQueryLogConfigId")));
+                case "AssociateResolverQueryLogConfig" -> {
+                    String vpcId = text(request, "ResourceId");
+                    if (vpcId != null && ec2Service.describeVpcs(region, List.of(vpcId), Map.of()).isEmpty()) {
+                        throw new AwsException("ResourceNotFoundException", "VPC not found: " + vpcId, 400);
+                    }
+                    yield queryLogAssociationResponse(service.associateResolverQueryLogConfig(request));
+                }
+                case "DisassociateResolverQueryLogConfig" -> queryLogAssociationResponse(
+                        service.disassociateResolverQueryLogConfig(request));
+                case "GetResolverQueryLogConfigAssociation" -> queryLogAssociationResponse(
+                        service.getResolverQueryLogConfigAssociation(
+                                text(request, "ResolverQueryLogConfigAssociationId")));
+                case "ListResolverQueryLogConfigAssociations" -> listResponse(
+                        "ResolverQueryLogConfigAssociations", service.listResolverQueryLogConfigAssociations());
+
                 case "TagResource" -> {
                     service.tagResource(text(request, "ResourceArn"), request.get("Tags"), region, accountId);
                     yield Response.ok(objectMapper.createObjectNode()).build();
@@ -90,7 +120,7 @@ public class Route53ResolverJsonHandler {
                                 "Unknown operation: Route53Resolver." + action))
                         .build();
             };
-        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+        } catch (AwsException e) {
             return Response.status(e.getHttpStatus())
                     .entity(new AwsErrorResponse(e.jsonType(), e.getMessage())).build();
         }
@@ -192,6 +222,25 @@ public class Route53ResolverJsonHandler {
         for (ObjectNode association : service.listResolverRuleAssociations()) {
             associations.add(association);
         }
+        return Response.ok(result).build();
+    }
+
+    // ---------- Query logging ----------
+
+    private Response queryLogConfigResponse(ObjectNode config) {
+        return Response.ok(objectMapper.createObjectNode().set("ResolverQueryLogConfig", config)).build();
+    }
+
+    private Response queryLogAssociationResponse(ObjectNode association) {
+        return Response.ok(objectMapper.createObjectNode()
+                .set("ResolverQueryLogConfigAssociation", association)).build();
+    }
+
+    private Response listResponse(String member, List<ObjectNode> items) {
+        ObjectNode result = objectMapper.createObjectNode();
+        result.put("TotalCount", items.size());
+        result.put("TotalFilteredCount", items.size());
+        result.putArray(member).addAll(items);
         return Response.ok(result).build();
     }
 }

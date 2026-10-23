@@ -12,9 +12,12 @@ import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.MultipartFormParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.RequestIdFilter;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailCaptureFilter;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
+import io.github.hectorvent.floci.services.cloudtrail.record.TlsDetails;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
@@ -84,7 +87,6 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
-import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
@@ -128,7 +130,6 @@ public class S3Controller {
     private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
     private final io.github.hectorvent.floci.services.floci.ui.UiPages uiPages;
     private final CloudTrailService cloudTrailService;
-    private final AccountResolver accountResolver;
     private final RequestContext requestContext;
     private final IamService iamService;
     private final IamEnforcementFilter iamEnforcementFilter;
@@ -142,7 +143,6 @@ public class S3Controller {
                         io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest,
                         io.github.hectorvent.floci.services.floci.ui.UiPages uiPages,
                         CloudTrailService cloudTrailService,
-                        AccountResolver accountResolver,
                         RequestContext requestContext,
                         IamService iamService,
                         IamEnforcementFilter iamEnforcementFilter,
@@ -155,7 +155,6 @@ public class S3Controller {
         this.currentVertxRequest = currentVertxRequest;
         this.uiPages = uiPages;
         this.cloudTrailService = cloudTrailService;
-        this.accountResolver = accountResolver;
         this.requestContext = requestContext;
         this.iamService = iamService;
         this.iamEnforcementFilter = iamEnforcementFilter;
@@ -170,26 +169,26 @@ public class S3Controller {
             String authHeader = null;
             String userAgent = null;
             String sourceIp = null;
+            TlsDetails tlsDetails = null;
             try {
                 var ctx = currentVertxRequest.getCurrent();
                 if (ctx != null) {
                     var req = ctx.request();
                     if (req != null) {
+                        tlsDetails = TlsDetails.of(req);
                         authHeader = req.getHeader("Authorization");
                         userAgent = req.getHeader("User-Agent");
-                        String fwd = req.getHeader("X-Forwarded-For");
-                        if (fwd != null && !fwd.isBlank()) {
-                            int comma = fwd.indexOf(',');
-                            sourceIp = (comma > 0 ? fwd.substring(0, comma) : fwd).trim();
-                        } else if (req.remoteAddress() != null) {
-                            sourceIp = req.remoteAddress().host();
-                        }
+                        sourceIp = CloudTrailCaptureFilter.sourceIp(req,
+                                config.services().cloudtrail().trustForwardedFor());
                     }
                 }
             } catch (Exception e) {
                 LOG.tracev(e, "CloudTrail: could not extract request context for S3 event {0}/{1}", bucket, key);
             }
-            String akid = accountResolver.extractAccessKeyId(authHeader);
+            String akid = requestContext.getAccessKeyId();
+            if (akid == null && authHeader != null && authHeader.startsWith("AWS ") && authHeader.indexOf(':') > 4) {
+                akid = authHeader.substring(4, authHeader.indexOf(':'));
+            }
             String region = requestContext.getRegion() != null
                     ? requestContext.getRegion() : regionResolver.getDefaultRegion();
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
@@ -205,6 +204,8 @@ public class S3Controller {
                     .errorCode(errorCode)
                     .errorMessage(errorMessage)
                     .eventTimeMillis(System.currentTimeMillis())
+                    .requestId(requestContext.getRequestId())
+                    .tlsDetails(tlsDetails)
                     .build());
         } catch (Exception e) {
             LOG.tracev(e, "CloudTrail event emission failed for {0} {1}/{2}", eventName, bucket, key);
@@ -1300,7 +1301,7 @@ public class S3Controller {
                 .elem("Message", ByteRange.NOT_SATISFIABLE_MESSAGE)
                 .elem("RangeRequested", rangeHeader)
                 .elem("ActualObjectSize", totalSize)
-                .elem("RequestId", UUID.randomUUID().toString())
+                .elem("RequestId", RequestIdFilter.current())
                 .end("Error")
                 .build();
         return Response.status(416)
@@ -1319,7 +1320,7 @@ public class S3Controller {
                 .elem("Message", PartRange.NOT_SATISFIABLE_MESSAGE)
                 .elem("PartNumberRequested", partNumber.toString())
                 .elem("ActualPartCount", actualPartCount)
-                .elem("RequestId", UUID.randomUUID().toString())
+                .elem("RequestId", RequestIdFilter.current())
                 .end("Error")
                 .build();
         return Response.status(416).entity(xml).type(MediaType.APPLICATION_XML).build();
@@ -3727,7 +3728,7 @@ public class S3Controller {
             }
         }
         String xml = xmlBuilder
-                .elem("RequestId", UUID.randomUUID().toString())
+                .elem("RequestId", RequestIdFilter.current())
                 .end("Error")
                 .build();
         Response.ResponseBuilder response = Response.status(e.getHttpStatus())

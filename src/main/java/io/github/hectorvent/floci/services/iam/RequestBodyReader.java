@@ -22,7 +22,7 @@ public final class RequestBodyReader {
     private RequestBodyReader() {
     }
 
-    static byte[] buffer(ContainerRequestContext ctx) {
+    public static byte[] buffer(ContainerRequestContext ctx) {
         Object cached = ctx.getProperty(BUFFERED_BODY_PROPERTY);
         if (cached instanceof byte[] bytes) {
             return bytes;

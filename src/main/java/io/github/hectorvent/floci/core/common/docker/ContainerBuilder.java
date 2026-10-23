@@ -178,6 +178,7 @@ public class ContainerBuilder {
         private final Map<String, String> tmpfs = new HashMap<>();
         private Long memorySwapBytes;
         private Long memorySwappiness;
+        private final Map<String, String> sysctls = new HashMap<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -691,6 +692,12 @@ public class ContainerBuilder {
             return this;
         }
 
+        /** Sets a namespaced kernel parameter at creation ({@code --sysctl}). */
+        public Builder withSysctl(String name, String value) {
+            this.sysctls.put(name, value);
+            return this;
+        }
+
         private void requireNoExistingDeviceRequest() {
             if (!deviceRequests.isEmpty()) {
                 throw new IllegalStateException(
@@ -779,7 +786,7 @@ public class ContainerBuilder {
                     Map.copyOf(portBindingHostIps),
                     init,
                     new LinuxOptions(List.copyOf(capAdd), List.copyOf(capDrop), List.copyOf(devices),
-                            shmSizeBytes, Map.copyOf(tmpfs), memorySwapBytes, memorySwappiness)
+                            shmSizeBytes, Map.copyOf(tmpfs), memorySwapBytes, memorySwappiness, Map.copyOf(sysctls))
             );
         }
     }

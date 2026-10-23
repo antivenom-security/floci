@@ -52,6 +52,9 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
     @Inject
     CloudTrailLogWriter trailWriter;
 
+    @Inject
+    S3Service s3Service;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -224,6 +227,7 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
         String userName = "presigned-post-trail-user-" + suffix;
         createBucketAsRoot(bucket, region);
         createBucketAsRoot(logBucket, region);
+        s3Service.putBucketPolicy(logBucket, cloudTrailBucketPolicy(logBucket));
         cloudTrail(region, "CreateTrail", "{\"Name\":\"" + trail + "\",\"S3BucketName\":\"" + logBucket + "\"}");
         cloudTrail(region, "PutEventSelectors", """
                 {"TrailName":"%s","EventSelectors":[{"ReadWriteType":"All","IncludeManagementEvents":false,
@@ -393,5 +397,12 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
         String amzDate = AMZ_DATE_FMT.format(Instant.now()).substring(0, 8);
         return "AWS4-HMAC-SHA256 Credential=" + accessKeyId + "/" + amzDate + "/" + region + "/" + service
                 + "/aws4_request, SignedHeaders=host, Signature=abc";
+    }
+
+    private static String cloudTrailBucketPolicy(String bucket) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"cloudtrail.amazonaws.com"},
+                  "Action":["s3:GetBucketAcl","s3:PutObject"],"Resource":["arn:aws:s3:::%1$s","arn:aws:s3:::%1$s/*"]}]}"""
+                .formatted(bucket);
     }
 }

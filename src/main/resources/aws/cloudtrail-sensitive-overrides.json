@@ -1,0 +1,12 @@
+{
+  "_source": "Hand-maintained. Members CloudTrail hides as HIDDEN_DUE_TO_SECURITY_REASONS although the service model does not mark them sensitive, keyed by event source and model shape. SNS Publish: https://docs.aws.amazon.com/sns/latest/dg/sns-logging-using-cloudtrail.html. STS credentials.sessionToken: AssumeRole records in OpenTelemetry collector-contrib awslogsencodingextension testdata.",
+  "members": {
+    "sns.amazonaws.com": {
+      "PublishInput": ["Message", "Subject", "MessageAttributes"],
+      "PublishBatchRequestEntry": ["Message", "Subject", "MessageAttributes"]
+    },
+    "sts.amazonaws.com": {
+      "Credentials": ["SessionToken"]
+    }
+  }
+}

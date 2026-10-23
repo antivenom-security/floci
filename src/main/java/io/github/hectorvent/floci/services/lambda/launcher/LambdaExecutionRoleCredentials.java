@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.services.cloudtrail.ServiceEventEmitter;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
@@ -26,10 +27,16 @@ public class LambdaExecutionRoleCredentials {
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     private final IamService iamService;
+    private final ServiceEventEmitter serviceEvents;
+
+    public LambdaExecutionRoleCredentials(IamService iamService) {
+        this(iamService, null);
+    }
 
     @Inject
-    public LambdaExecutionRoleCredentials(IamService iamService) {
+    public LambdaExecutionRoleCredentials(IamService iamService, ServiceEventEmitter serviceEvents) {
         this.iamService = iamService;
+        this.serviceEvents = serviceEvents;
     }
 
     /**
@@ -53,11 +60,18 @@ public class LambdaExecutionRoleCredentials {
      * the existing container credential fallback rather than becoming an implicit deny-all caller.
      */
     public Optional<SessionCreds> forFunction(LambdaFunction function) {
-        return forRole(function.getRole(), sessionAccountId(function), function.getFunctionName());
+        return forRole(function.getRole(), sessionAccountId(function), function.getFunctionName(),
+                AwsArnUtils.regionOrDefault(function.getFunctionArn(), null));
     }
 
     /** A session for {@code roleArn} assumed on behalf of {@code functionName} in {@code functionAccountId}. */
     public Optional<SessionCreds> forRole(String roleArn, String functionAccountId, String functionName) {
+        return forRole(roleArn, functionAccountId, functionName, null);
+    }
+
+    /** As above; with a {@code region}, the assumption is recorded as Lambda's CloudTrail event there. */
+    private Optional<SessionCreds> forRole(String roleArn, String functionAccountId, String functionName,
+                                           String region) {
         if (roleArn == null || roleArn.isBlank()
                 || functionAccountId == null || functionAccountId.isBlank()) {
             return Optional.empty();
@@ -91,6 +105,10 @@ public class LambdaExecutionRoleCredentials {
         iamService.registerLambdaExecutionRoleSession(
                 functionAccountId, credentials.accessKeyId(), credentials.secretAccessKey(),
                 credentials.sessionToken(), roleArn, functionName, assumedRoleId);
+        if (serviceEvents != null && region != null) {
+            serviceEvents.assumeRole("lambda", region, roleArn, functionName, credentials.accessKeyId(),
+                    credentials.sessionToken(), assumedRoleId, null);
+        }
         return Optional.of(credentials);
     }
 

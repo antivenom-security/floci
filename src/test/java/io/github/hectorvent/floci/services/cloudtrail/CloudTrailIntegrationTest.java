@@ -167,7 +167,7 @@ class CloudTrailIntegrationTest {
                     "Bad eventType: " + rec);
             assertNotNull(rec.path("eventID").asText(null), "Missing eventID");
             assertNotNull(rec.path("requestID").asText(null), "Missing requestID");
-            assertEquals("IAMUser", rec.path("userIdentity").path("type").asText(),
+            assertEquals("AWSAccount", rec.path("userIdentity").path("type").asText(),
                     "Bad userIdentity.type: " + rec);
 
             String name = rec.path("eventName").asText();

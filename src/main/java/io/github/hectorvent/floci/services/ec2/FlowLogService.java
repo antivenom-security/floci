@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
@@ -15,6 +17,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -27,9 +30,14 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.UUID;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
@@ -39,21 +47,12 @@ import java.util.regex.Pattern;
 import java.util.zip.GZIPOutputStream;
 
 /**
- * Manages VPC Flow Logs (a floci addition — absent upstream) and a background
- * generator that synthesizes realistic VPC flow-log records and delivers them
- * to the configured S3 bucket.
+ * VPC Flow Logs: the CreateFlowLogs/DescribeFlowLogs/DeleteFlowLogs state and record delivery.
  *
- * <p>Records use the AWS VPC Flow Logs <b>default format</b> (version 5, the
- * full 29-field space-delimited layout with a header line) and are written
- * under the exact AWS S3 key prefix
- * {@code AWSLogs/{account}/vpcflowlogs/{region}/{yyyy}/{MM}/{dd}/{HH}/...log.gz}.
- * This is the exact layout AWS uses, so any tool that lists and parses VPC flow
- * logs can ingest the emulated traffic with no real cloud spend.</p>
- *
- * <p>Records are correlated to the real EC2 inventory: source/destination
- * addresses, ENI ids, instance ids, subnet ids and vpc ids are taken from the
- * instances/ENIs that actually exist in {@link Ec2Service} for the flow log's
- * resource, so the synthesized flows reference resources that genuinely exist.</p>
+ * <p>In {@code observed} mode {@link FlowCaptureService} feeds real per-ENI observations into
+ * {@link #ingest}, which aggregates them per window and writes S3 files and CloudWatch Logs
+ * events in AWS's layouts. In {@code synthetic} mode a background generator fabricates records
+ * from the EC2 inventory instead, and in {@code off} mode nothing is delivered.</p>
  */
 @ApplicationScoped
 public class FlowLogService {
@@ -87,14 +86,15 @@ public class FlowLogService {
             Map.entry("region", 4), Map.entry("az-id", 4), Map.entry("sublocation-type", 4),
             Map.entry("sublocation-id", 4),
             Map.entry("pkt-src-aws-service", 5), Map.entry("pkt-dst-aws-service", 5),
-            Map.entry("flow-direction", 5), Map.entry("traffic-path", 5));
+            Map.entry("flow-direction", 5), Map.entry("traffic-path", 5),
+            Map.entry("ecs-cluster-arn", 7), Map.entry("ecs-cluster-name", 7),
+            Map.entry("ecs-container-instance-arn", 7), Map.entry("ecs-container-instance-id", 7),
+            Map.entry("ecs-container-id", 7), Map.entry("ecs-second-container-id", 7),
+            Map.entry("ecs-service-name", 7), Map.entry("ecs-task-definition-arn", 7),
+            Map.entry("ecs-task-arn", 7), Map.entry("ecs-task-id", 7),
+            Map.entry("reject-reason", 8));
 
-    /**
-     * One ${field-name} token of a LogFormat.
-     *
-     * <p>Deliberately not restricted to the fields below. A token this emulator does not recognise
-     * still names a column the caller asked for, and matching it keeps that column in place.
-     */
+    /** One ${field-name} token of a LogFormat, validated against {@link #FIELD_VERSIONS} on create. */
     private static final Pattern FIELD_TOKEN = Pattern.compile("\\$\\{([^}\\s]+)\\}");
 
     /**
@@ -103,8 +103,12 @@ public class FlowLogService {
      */
     static final List<String> DEFAULT_FIELDS = tokensOf(DEFAULT_LOG_FORMAT);
 
-    private static final DateTimeFormatter PATH_FMT =
-            DateTimeFormatter.ofPattern("yyyy/MM/dd/HH").withZone(ZoneOffset.UTC);
+    private static final DateTimeFormatter DATE_FMT =
+            DateTimeFormatter.ofPattern("yyyy/MM/dd").withZone(ZoneOffset.UTC);
+    private static final DateTimeFormatter HIVE_DATE_FMT =
+            DateTimeFormatter.ofPattern("'year='yyyy/'month='MM/'day='dd").withZone(ZoneOffset.UTC);
+    private static final DateTimeFormatter HOUR_FMT =
+            DateTimeFormatter.ofPattern("HH").withZone(ZoneOffset.UTC);
     private static final DateTimeFormatter FILE_TS_FMT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmm'Z'").withZone(ZoneOffset.UTC);
 
@@ -114,23 +118,50 @@ public class FlowLogService {
 
     private final Ec2Service ec2Service;
     private final S3Service s3Service;
+    private final CloudWatchLogsService logsService;
+    private final String mode;
+    private final int s3PublishIntervalSeconds;
+    private final Map<String, Window> windows = new HashMap<>();
+    private final Map<String, List<String>> pendingS3 = new HashMap<>();
+    private final Map<String, Instant> lastS3Publish = new HashMap<>();
+    private static final int MAX_PENDING_S3_ROWS = 100_000;
     private ScheduledExecutorService scheduler;
 
     @Inject
-    public FlowLogService(Ec2Service ec2Service, S3Service s3Service, StorageFactory storageFactory) {
-        this(ec2Service, s3Service,
-                storageFactory.create("ec2", "ec2-flow-logs.json", new TypeReference<Map<String, FlowLog>>() {}));
+    public FlowLogService(Ec2Service ec2Service, S3Service s3Service, CloudWatchLogsService logsService,
+                          StorageFactory storageFactory, EmulatorConfig config) {
+        this(ec2Service, s3Service, logsService,
+                storageFactory.create("ec2", "ec2-flow-logs.json", new TypeReference<Map<String, FlowLog>>() {}),
+                resolveMode(config), config.services().ec2().flowLogs().s3PublishIntervalSeconds());
+    }
+
+    /** The configured mode, or observed when security-group enforcement is on and synthetic otherwise. */
+    static String resolveMode(EmulatorConfig config) {
+        return config.services().ec2().flowLogs().mode()
+                .orElse(config.network().securityGroupEnforcement().enabled() ? "observed" : "synthetic");
     }
 
     // Package-private for hermetic tests (pass an in-memory StorageBackend directly).
-    FlowLogService(Ec2Service ec2Service, S3Service s3Service,
-                   StorageBackend<String, FlowLog> flowLogs) {
+    FlowLogService(Ec2Service ec2Service, S3Service s3Service, CloudWatchLogsService logsService,
+                   StorageBackend<String, FlowLog> flowLogs, String mode, int s3PublishIntervalSeconds) {
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
+        this.logsService = logsService;
         this.flowLogs = flowLogs;
+        this.mode = mode;
+        this.s3PublishIntervalSeconds = s3PublishIntervalSeconds;
+    }
+
+    /** observed, synthetic or off. */
+    public String mode() {
+        return mode;
     }
 
     void onStart(@Observes StartupEvent ev) {
+        if (!"synthetic".equals(mode)) {
+            LOG.infov("Flow logs mode: {0}", mode);
+            return;
+        }
         scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "floci-flowlog-generator");
             t.setDaemon(true);
@@ -143,9 +174,23 @@ public class FlowLogService {
         LOG.info("FlowLog generator scheduled (every 60s)");
     }
 
-    void onStop(@Observes ShutdownEvent ev) {
+    /** Runs before storage teardown, so the open windows still reach their destinations. */
+    void onStop(@Observes @Priority(1000) ShutdownEvent ev) {
         if (scheduler != null) {
             scheduler.shutdownNow();
+        }
+        if ("observed".equals(mode)) {
+            flushOpenWindows(Instant.now());
+        }
+    }
+
+    synchronized void flushOpenWindows(Instant now) {
+        for (FlowLog fl : flowLogs.scan(k -> true)) {
+            Window window = windows.remove(fl.getFlowLogId());
+            if (window != null) {
+                deliver(fl, window, now.getEpochSecond());
+            }
+            flushS3(fl, now);
         }
     }
 
@@ -155,26 +200,101 @@ public class FlowLogService {
                                  String trafficType, String logDestinationType,
                                  String logDestination, String deliverLogsPermissionArn,
                                  String logFormat, int maxAggregationInterval) {
+        return createFlowLog(region, resourceId, resourceType, trafficType, logDestinationType, logDestination,
+                null, deliverLogsPermissionArn, logFormat, maxAggregationInterval, null, false, false);
+    }
+
+    public FlowLog createFlowLog(String region, String resourceId, String resourceType,
+                                 String trafficType, String logDestinationType,
+                                 String logDestination, String logGroupName, String deliverLogsPermissionArn,
+                                 String logFormat, int maxAggregationInterval, String fileFormat,
+                                 boolean hiveCompatiblePartitions, boolean perHourPartition) {
+        if (resourceType == null) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter ResourceType.", 400);
+        }
+        if (!Set.of("VPC", "Subnet", "NetworkInterface").contains(resourceType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + resourceType + ") for parameter ResourceType is invalid.", 400);
+        }
+        String traffic = trafficType != null ? trafficType : "ALL";
+        if (!Set.of("ALL", "ACCEPT", "REJECT").contains(traffic)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + traffic + ") for parameter TrafficType is invalid.", 400);
+        }
+        String destinationType = logDestinationType != null ? logDestinationType : "cloud-watch-logs";
+        if ("kinesis-data-firehose".equals(destinationType)) {
+            throw new AwsException("UnsupportedOperation",
+                    "The log destination type kinesis-data-firehose is not supported.", 400);
+        }
+        if (maxAggregationInterval != 60 && maxAggregationInterval != 600) {
+            throw new AwsException("InvalidParameterValue", "Value (" + maxAggregationInterval
+                    + ") for parameter MaxAggregationInterval is invalid. Valid values are 60 and 600.", 400);
+        }
+        String format = fileFormat != null ? fileFormat : "plain-text";
+        if ("parquet".equals(format)) {
+            throw new AwsException("UnsupportedOperation", "The file format parquet is not supported.", 400);
+        }
+        if (!"plain-text".equals(format)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + format + ") for parameter FileFormat is invalid.", 400);
+        }
+        String groupName = logGroupName;
+        switch (destinationType) {
+            case "s3" -> {
+                if (logDestination == null || logDestination.isBlank()) {
+                    throw new AwsException("InvalidParameter", "LogDestination is required for an s3 destination.", 400);
+                }
+            }
+            case "cloud-watch-logs" -> {
+                if (groupName == null && logDestination != null) {
+                    groupName = logGroupFromArn(logDestination);
+                }
+                if (groupName == null || groupName.isBlank()) {
+                    throw new AwsException("InvalidParameter",
+                            "LogGroupName or LogDestination is required for a cloud-watch-logs destination.", 400);
+                }
+                if (deliverLogsPermissionArn == null || deliverLogsPermissionArn.isBlank()) {
+                    throw new AwsException("InvalidParameter",
+                            "DeliverLogsPermissionArn is required for a cloud-watch-logs destination.", 400);
+                }
+            }
+            default -> throw new AwsException("InvalidParameterValue",
+                    "Value (" + destinationType + ") for parameter LogDestinationType is invalid.", 400);
+        }
+        if (logFormat != null && !logFormat.isBlank()) {
+            List<String> unknown = tokensOf(logFormat).stream().filter(f -> !FIELD_VERSIONS.containsKey(f)).toList();
+            if (!unknown.isEmpty()) {
+                throw new AwsException("InvalidParameter", "Unknown fields provided: ${"
+                        + String.join("}, ${", unknown) + "}", 400);
+            }
+        }
+
         FlowLog fl = new FlowLog();
         fl.setFlowLogId("fl-" + randomHex(17));
         fl.setResourceId(resourceId);
-        fl.setResourceType(resourceType != null ? resourceType : "VPC");
-        fl.setTrafficType(trafficType != null ? trafficType : "ALL");
-        fl.setLogDestinationType(logDestinationType != null ? logDestinationType : "s3");
-        fl.setLogDestination(logDestination);
+        fl.setResourceType(resourceType);
+        fl.setTrafficType(traffic);
+        fl.setLogDestinationType(destinationType);
+        fl.setLogDestination(logDestination == null && groupName != null
+                ? AwsArnUtils.Arn.of("logs", region, ec2Service.callerAccountId(), "log-group:" + groupName).toString()
+                : logDestination);
+        fl.setLogGroupName(groupName);
         fl.setDeliverLogsPermissionArn(deliverLogsPermissionArn);
-        fl.setBucketName(bucketFromArn(logDestination));
+        fl.setBucketName("s3".equals(destinationType) ? bucketFromArn(logDestination) : null);
         fl.setLogFormat(logFormat);
         fl.setMaxAggregationInterval(maxAggregationInterval);
+        fl.setFileFormat(format);
+        fl.setHiveCompatiblePartitions(hiveCompatiblePartitions);
+        fl.setPerHourPartition(perHourPartition);
         fl.setRegion(region);
         fl.setAccountId(ec2Service.callerAccountId());
         flowLogs.put(fl.getFlowLogId(), fl);
         LOG.infov("Created flow log {0} for {1} {2} -> {3}",
-                fl.getFlowLogId(), fl.getResourceType(), resourceId, fl.getBucketName());
+                fl.getFlowLogId(), fl.getResourceType(), resourceId, destinationType);
 
         // Deliver an initial batch right away so flows are visible without
         // waiting for the first scheduled tick.
-        if ("s3".equals(fl.getLogDestinationType()) && fl.getBucketName() != null) {
+        if ("synthetic".equals(mode) && "s3".equals(fl.getLogDestinationType()) && fl.getBucketName() != null) {
             try {
                 generateAndDeliver(fl);
             } catch (Exception e) {
@@ -215,6 +335,234 @@ public class FlowLogService {
             deleted.add(id);
         }
         return deleted;
+    }
+
+    // ─── Observed delivery ──────────────────────────────────────────────────────
+
+    /** One managed ENI as a flow record describes it. {@code ecs} holds the v7 fields of a task ENI. */
+    public record FlowEni(String eniId, String accountId, String region, String vpcId, String subnetId,
+                          String instanceId, String availabilityZone, Map<String, String> ecs) {}
+
+    /** What identifies one record: an ENI, a 5-tuple, a direction and an action. */
+    public record FlowKey(String eniId, String srcAddr, String dstAddr, int srcPort, int dstPort,
+                          int protocol, String direction, String action, String peerService,
+                          String trafficPath) {}
+
+    /** Packets and bytes one tick observed for a key, with the TCP flags seen. */
+    public record FlowObservation(FlowKey key, long packets, long bytes, int tcpFlags) {}
+
+    /**
+     * Adds one capture tick: the managed ENIs that exist now and the traffic they carried since
+     * the previous tick. Closes every aggregation window that has run its interval, and writes S3
+     * files on the publish interval.
+     */
+    public synchronized void ingest(Instant now, List<FlowEni> enis, List<FlowObservation> observations) {
+        Set<String> ids = new HashSet<>();
+        for (FlowLog fl : flowLogs.scan(k -> true)) {
+            String id = fl.getFlowLogId();
+            ids.add(id);
+            Window window = windows.computeIfAbsent(id, k -> new Window(now.getEpochSecond()));
+            lastS3Publish.putIfAbsent(id, now);
+            Map<String, FlowEni> covered = new HashMap<>();
+            for (FlowEni eni : enis) {
+                if (covers(fl, eni)) {
+                    covered.put(eni.eniId(), eni);
+                }
+            }
+            window.members.putAll(covered);
+            for (FlowObservation observation : observations) {
+                FlowKey key = observation.key();
+                if (covered.containsKey(key.eniId())
+                        && ("ALL".equals(fl.getTrafficType()) || fl.getTrafficType().equals(key.action()))) {
+                    window.add(observation, now.getEpochSecond());
+                }
+            }
+            if (now.getEpochSecond() >= window.start + fl.getMaxAggregationInterval()) {
+                deliver(fl, window, now.getEpochSecond());
+                windows.put(id, new Window(now.getEpochSecond()));
+            }
+            if (!now.isBefore(lastS3Publish.get(id).plusSeconds(s3PublishIntervalSeconds))) {
+                flushS3(fl, now);
+            }
+        }
+        windows.keySet().retainAll(ids);
+        pendingS3.keySet().retainAll(ids);
+        lastS3Publish.keySet().retainAll(ids);
+    }
+
+    /** Whether any flow log covers this ENI, so its traffic is worth polling. */
+    public boolean observes(FlowEni eni) {
+        for (FlowLog fl : flowLogs.scan(k -> true)) {
+            if (covers(fl, eni)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean covers(FlowLog fl, FlowEni eni) {
+        if (!eni.accountId().equals(fl.getAccountId()) || !eni.region().equals(fl.getRegion())) {
+            return false;
+        }
+        String rid = fl.getResourceId();
+        return switch (fl.getResourceType()) {
+            case "VPC" -> rid.equals(eni.vpcId());
+            case "Subnet" -> rid.equals(eni.subnetId());
+            case "NetworkInterface" -> rid.equals(eni.eniId());
+            default -> false;
+        };
+    }
+
+    /** Renders a closed window, one NODATA record for each covered ENI that carried nothing. */
+    private void deliver(FlowLog fl, Window window, long end) {
+        List<String> fields = fieldsOf(fl);
+        String version = formatVersion(fields);
+        Map<String, List<Long>> startsByEni = new LinkedHashMap<>();
+        Map<String, List<String>> rowsByEni = new LinkedHashMap<>();
+        List<Map.Entry<FlowKey, Aggregate>> flows = new ArrayList<>(window.flows.entrySet());
+        flows.sort(Comparator.comparingLong(e -> e.getValue().first));
+        for (Map.Entry<FlowKey, Aggregate> flow : flows) {
+            FlowKey key = flow.getKey();
+            Aggregate agg = flow.getValue();
+            FlowEni eni = window.members.get(key.eniId());
+            Map<String, String> values = new HashMap<>(eni.ecs());
+            values.put("version", version);
+            values.put("account-id", eni.accountId());
+            values.put("interface-id", eni.eniId());
+            values.put("srcaddr", key.srcAddr());
+            values.put("dstaddr", key.dstAddr());
+            values.put("srcport", String.valueOf(key.srcPort()));
+            values.put("dstport", String.valueOf(key.dstPort()));
+            values.put("protocol", String.valueOf(key.protocol()));
+            values.put("packets", String.valueOf(agg.packets));
+            values.put("bytes", String.valueOf(agg.bytes));
+            values.put("start", String.valueOf(agg.first));
+            values.put("end", String.valueOf(agg.last));
+            values.put("action", key.action());
+            values.put("log-status", "OK");
+            values.put("vpc-id", nz(eni.vpcId()));
+            values.put("subnet-id", nz(eni.subnetId()));
+            values.put("instance-id", nz(eni.instanceId()));
+            values.put("tcp-flags", String.valueOf(agg.tcpFlags));
+            values.put("type", key.srcAddr().contains(":") ? "IPv6" : "IPv4");
+            values.put("pkt-srcaddr", key.srcAddr());
+            values.put("pkt-dstaddr", key.dstAddr());
+            values.put("region", eni.region());
+            values.put("az-id", nz(azId(eni.region(), eni.availabilityZone())));
+            boolean egress = "egress".equals(key.direction());
+            values.put("pkt-src-aws-service", !egress ? nz(key.peerService()) : "-");
+            values.put("pkt-dst-aws-service", egress ? nz(key.peerService()) : "-");
+            values.put("flow-direction", key.direction());
+            values.put("traffic-path", nz(key.trafficPath()));
+            rowsByEni.computeIfAbsent(eni.eniId(), k -> new ArrayList<>()).add(render(fields, values));
+            startsByEni.computeIfAbsent(eni.eniId(), k -> new ArrayList<>()).add(agg.first);
+        }
+        for (FlowEni eni : window.members.values()) {
+            if (rowsByEni.containsKey(eni.eniId())) {
+                continue;
+            }
+            rowsByEni.put(eni.eniId(), List.of(render(fields, Map.of(
+                    "version", version, "account-id", eni.accountId(), "interface-id", eni.eniId(),
+                    "start", String.valueOf(window.start), "end", String.valueOf(end), "log-status", "NODATA"))));
+            startsByEni.put(eni.eniId(), List.of(window.start));
+        }
+        if (rowsByEni.isEmpty()) {
+            return;
+        }
+        if ("s3".equals(fl.getLogDestinationType())) {
+            List<String> pending = pendingS3.computeIfAbsent(fl.getFlowLogId(), k -> new ArrayList<>());
+            rowsByEni.values().forEach(pending::addAll);
+        } else {
+            rowsByEni.forEach((eniId, rows) -> writeCloudWatch(fl, eniId, rows, startsByEni.get(eniId)));
+        }
+    }
+
+    /** Writes the pending rows as one file. Rows a failed write could not deliver wait for the next one. */
+    private void flushS3(FlowLog fl, Instant now) {
+        List<String> pending = pendingS3.get(fl.getFlowLogId());
+        lastS3Publish.put(fl.getFlowLogId(), now);
+        if (pending == null || pending.isEmpty()) {
+            return;
+        }
+        String key = s3Key(fl, now);
+        try {
+            s3Service.putObject(fl.getBucketName(), key,
+                    gzip(String.join(" ", fieldsOf(fl)) + "\n" + String.join("\n", pending) + "\n"),
+                    "application/octet-stream", Map.of("content-encoding", "gzip"));
+            LOG.debugv("Delivered {0} flow records to s3://{1}/{2}", pending.size(), fl.getBucketName(), key);
+            pending.clear();
+        } catch (RuntimeException e) {
+            LOG.warnv("Flow log {0} could not deliver {1} records to s3://{2}/{3}, retrying next interval: {4}",
+                    fl.getFlowLogId(), pending.size(), fl.getBucketName(), key, e.getMessage());
+            if (pending.size() > MAX_PENDING_S3_ROWS) {
+                // shortcut: drops the oldest rows past the cap, until destinations report delivery errors.
+                pending.subList(0, pending.size() - MAX_PENDING_S3_ROWS).clear();
+            }
+        }
+    }
+
+    /** One stream per ENI, named for the traffic type, each record an event stamped with its start. */
+    private void writeCloudWatch(FlowLog fl, String eniId, List<String> rows, List<Long> starts) {
+        String group = fl.getLogGroupName();
+        String stream = eniId + "-" + fl.getTrafficType().toLowerCase(Locale.ROOT);
+        try {
+            try {
+                logsService.createLogGroupForAccount(fl.getAccountId(), group, null, Map.of(), fl.getRegion());
+            } catch (AwsException e) {
+                requireAlreadyExists(e);
+            }
+            try {
+                logsService.createLogStreamForAccount(fl.getAccountId(), group, stream, fl.getRegion());
+            } catch (AwsException e) {
+                requireAlreadyExists(e);
+            }
+            List<Map<String, Object>> events = new ArrayList<>();
+            for (int i = 0; i < rows.size(); i++) {
+                events.add(Map.of("timestamp", starts.get(i) * 1000, "message", rows.get(i)));
+            }
+            events.sort(Comparator.comparingLong(e -> (Long) e.get("timestamp")));
+            logsService.putLogEventsForAccount(fl.getAccountId(), group, stream, events, fl.getRegion());
+        } catch (RuntimeException e) {
+            LOG.warnv("Flow log {0} could not deliver {1} records to {2}/{3}: {4}",
+                    fl.getFlowLogId(), rows.size(), group, stream, e.getMessage());
+        }
+    }
+
+    private static void requireAlreadyExists(AwsException e) {
+        if (!"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
+            throw e;
+        }
+    }
+
+    private static final class Window {
+        final long start;
+        final Map<String, FlowEni> members = new HashMap<>();
+        final Map<FlowKey, Aggregate> flows = new HashMap<>();
+
+        Window(long start) {
+            this.start = start;
+        }
+
+        void add(FlowObservation observation, long tick) {
+            Aggregate agg = flows.computeIfAbsent(observation.key(), k -> new Aggregate(tick));
+            agg.packets += observation.packets();
+            agg.bytes += observation.bytes();
+            agg.tcpFlags |= observation.tcpFlags();
+            agg.last = tick;
+        }
+    }
+
+    private static final class Aggregate {
+        final long first;
+        long last;
+        long packets;
+        long bytes;
+        int tcpFlags;
+
+        Aggregate(long first) {
+            this.first = first;
+            this.last = first;
+        }
     }
 
     // ─── Generation ───────────────────────────────────────────────────────────
@@ -269,7 +617,7 @@ public class FlowLogService {
         // endpoint — which is how traffic to an AWS service over PrivateLink shows
         // up in flow logs. The endpoint's service is recorded in pkt-dst-aws-service.
         List<String> endpointIps = new ArrayList<>();
-        Map<String, String> endpointService = new java.util.HashMap<>(); // ip -> service short name (e.g. S3)
+        Map<String, String> endpointService = new HashMap<>(); // ip -> service short name (e.g. S3)
         String resourceVpc = vpcOfFlowLogResource(fl);
         for (NetworkInterface ni : ec2Service.endpointNetworkInterfaces(fl.getRegion())) {
             if (ni.getPrivateIpAddress() == null || ni.getPrivateIpAddress().isBlank()) {
@@ -362,21 +710,24 @@ public class FlowLogService {
         return List.copyOf(fields);
     }
 
-    /**
-     * The version AWS numbers a format by, which is the highest any of its fields belongs to.
-     *
-     * <p>{@link #FIELD_VERSIONS} is complete through version 5, so a field missing from it belongs
-     * to a later version, and one this emulator has no value for either. Such a field counts as
-     * the highest version the table does define rather than the lowest, which would report 2 for a
-     * record that plainly is not a version 2 one.
-     */
+    /** The version AWS numbers a format by, which is the highest any of its fields belongs to. */
     private static String formatVersion(List<String> fields) {
-        int highestKnown = FIELD_VERSIONS.values().stream().mapToInt(Integer::intValue).max().orElse(2);
         int version = 2;
         for (String field : fields) {
-            version = Math.max(version, FIELD_VERSIONS.getOrDefault(field, highestKnown));
+            version = Math.max(version, FIELD_VERSIONS.getOrDefault(field, 2));
         }
         return String.valueOf(version);
+    }
+
+    private static String render(List<String> fields, Map<String, String> values) {
+        StringBuilder row = new StringBuilder();
+        for (String field : fields) {
+            if (row.length() > 0) {
+                row.append(' ');
+            }
+            row.append(values.getOrDefault(field, "-"));
+        }
+        return row.toString();
     }
 
     private String record(FlowLog fl, List<String> fields, Eni eni, String src, String dst,
@@ -423,15 +774,7 @@ public class FlowLogService {
                 Map.entry("pkt-dst-aws-service", pktDstSvc),
                 Map.entry("flow-direction", direction),
                 Map.entry("traffic-path", egress ? "1" : "-"));
-
-        StringBuilder row = new StringBuilder();
-        for (String field : fields) {
-            if (row.length() > 0) {
-                row.append(' ');
-            }
-            row.append(values.getOrDefault(field, "-"));
-        }
-        return row.toString();
+        return render(fields, values);
     }
 
     // ─── Inventory correlation ─────────────────────────────────────────────────
@@ -547,13 +890,31 @@ public class FlowLogService {
 
     // ─── Helpers ────────────────────────────────────────────────────────────
 
-    private String s3Key(FlowLog fl, Instant when) {
-        String datePath = PATH_FMT.format(when);
-        String ts = FILE_TS_FMT.format(when);
-        String file = fl.getAccountId() + "_vpcflowlogs_" + fl.getRegion() + "_" + fl.getFlowLogId()
-                + "_" + ts + "_" + randomHex(8) + ".log.gz";
-        return String.format("AWSLogs/%s/vpcflowlogs/%s/%s/%s",
-                fl.getAccountId(), fl.getRegion(), datePath, file);
+    /** The VPC-S3PATH key: optional prefix, plain or Hive partitions, optional hour partition. */
+    String s3Key(FlowLog fl, Instant when) {
+        String name = AwsArnUtils.resourceIfArnFor(fl.getLogDestination(), "s3").orElse(fl.getLogDestination());
+        int slash = name.indexOf('/');
+        String prefix = slash >= 0 && slash < name.length() - 1 ? name.substring(slash + 1) : "";
+        if (!prefix.isEmpty() && !prefix.endsWith("/")) {
+            prefix += "/";
+        }
+        String partitions = fl.isHiveCompatiblePartitions()
+                ? "AWSLogs/aws-account-id=" + fl.getAccountId() + "/aws-service=vpcflowlogs/aws-region="
+                        + fl.getRegion() + "/" + HIVE_DATE_FMT.format(when) + "/"
+                        + (fl.isPerHourPartition() ? "hour=" + HOUR_FMT.format(when) + "/" : "")
+                : "AWSLogs/" + fl.getAccountId() + "/vpcflowlogs/" + fl.getRegion() + "/" + DATE_FMT.format(when) + "/"
+                        + (fl.isPerHourPartition() ? HOUR_FMT.format(when) + "/" : "");
+        return prefix + partitions + fl.getAccountId() + "_vpcflowlogs_" + fl.getRegion() + "_" + fl.getFlowLogId()
+                + "_" + FILE_TS_FMT.format(when) + "_" + randomHex(8) + ".log.gz";
+    }
+
+    static String logGroupFromArn(String arn) {
+        String resource = AwsArnUtils.resourceIfArnFor(arn, "logs").orElse(null);
+        if (resource == null || !resource.startsWith("log-group:")) {
+            return arn.contains(":") ? null : arn;
+        }
+        String name = resource.substring("log-group:".length());
+        return name.endsWith(":*") ? name.substring(0, name.length() - 2) : name;
     }
 
     private static byte[] gzip(String content) {

@@ -59,7 +59,7 @@ class CloudTrailLogWriterBatchingIntegrationTest {
 
         createBucket(bucket);
 
-        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey(region, trailName, region);
+        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey("000000000000", region, trailName, region);
         Deque<ObjectNode> pending = records(CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE);
         installMockCloudTrailService(bucket, trailName, region, key, pending);
 
@@ -82,7 +82,7 @@ class CloudTrailLogWriterBatchingIntegrationTest {
 
         createBucket(bucket);
 
-        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey(region, trailName, region);
+        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey("000000000000", region, trailName, region);
         Deque<ObjectNode> pending = records(1_001);
         installMockCloudTrailService(bucket, trailName, region, key, pending);
 
@@ -105,7 +105,7 @@ class CloudTrailLogWriterBatchingIntegrationTest {
 
         createBucket(bucket);
 
-        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey(region, trailName, region);
+        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey("000000000000", region, trailName, region);
         Deque<ObjectNode> pending = records(2_500);
         installMockCloudTrailService(bucket, trailName, region, key, pending);
 
@@ -163,11 +163,11 @@ class CloudTrailLogWriterBatchingIntegrationTest {
 
         createBucket(bucket);
 
-        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey(region, trailName, region);
+        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey("000000000000", region, trailName, region);
         Deque<ObjectNode> pending = records(2);
         Trail trail = new Trail(trailName,
                 "arn:aws:cloudtrail:" + region + ":000000000000:trail/" + trailName,
-                bucket, null, null, true, false, region, false, false, false, false);
+                bucket, null, null, true, false, region, false, false, false, false, null, null);
         CountDownLatch firstDrainEntered = new CountDownLatch(1);
         CountDownLatch releaseFirstDrain = new CountDownLatch(1);
         CountDownLatch secondDrainEntered = new CountDownLatch(1);
@@ -179,7 +179,7 @@ class CloudTrailLogWriterBatchingIntegrationTest {
         when(mockService.trailsWithPendingRecords())
                 .thenAnswer(inv -> pending.isEmpty() ? List.of() : List.of(key));
         when(mockService.pendingRecordCount(eq(key))).thenAnswer(inv -> pending.size());
-        when(mockService.getTrail(region, trailName)).thenReturn(trail);
+        when(mockService.getTrail(key)).thenReturn(trail);
         when(mockService.drainPendingRecords(eq(key), eq(CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE)))
                 .thenAnswer(inv -> {
                     if (!inDrain.compareAndSet(false, true)) {
@@ -222,13 +222,13 @@ class CloudTrailLogWriterBatchingIntegrationTest {
                                               Deque<ObjectNode> pending) {
         Trail trail = new Trail(trailName,
                 "arn:aws:cloudtrail:" + region + ":000000000000:trail/" + trailName,
-                bucket, null, null, true, false, region, false, false, false, false);
+                bucket, null, null, true, false, region, false, false, false, false, null, null);
 
         CloudTrailService mockService = mock(CloudTrailService.class);
         when(mockService.trailsWithPendingRecords())
                 .thenAnswer(inv -> pending.isEmpty() ? List.of() : List.of(key));
         when(mockService.pendingRecordCount(eq(key))).thenAnswer(inv -> pending.size());
-        when(mockService.getTrail(region, trailName)).thenReturn(trail);
+        when(mockService.getTrail(key)).thenReturn(trail);
         when(mockService.drainPendingRecords(eq(key), eq(CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE)))
                 .thenAnswer(inv -> drain(pending, CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE));
         doAnswer(inv -> null).when(mockService).emitS3DataEvent(any());

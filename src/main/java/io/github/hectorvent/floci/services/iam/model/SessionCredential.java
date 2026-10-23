@@ -50,6 +50,7 @@ public class SessionCredential {
      * resolve it by name.
      */
     private String delegatedApproverArn;
+    private Instant creationDate = Instant.now();
 
     public SessionCredential() {}
 
@@ -150,4 +151,7 @@ public class SessionCredential {
 
     public String getDelegatedApproverArn() { return delegatedApproverArn; }
     public void setDelegatedApproverArn(String arn) { this.delegatedApproverArn = arn; }
+
+    public Instant getCreationDate() { return creationDate; }
+    public void setCreationDate(Instant creationDate) { this.creationDate = creationDate; }
 }

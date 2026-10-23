@@ -56,6 +56,11 @@
 |---|---|---|
 | `FLOCI_SERVICES_EVENTBRIDGE_ENABLED` | `true` | Enable or disable the service |
 
+Rules take the states `ENABLED`, `DISABLED` and
+`ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS`. Only the last receives
+read-only management events from CloudTrail; see
+[CloudTrail](cloudtrail.md#eventbridge).
+
 ## Examples
 
 ```bash
