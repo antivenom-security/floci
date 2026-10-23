@@ -123,8 +123,7 @@ public class CloudTrailCaptureFilter implements ContainerRequestFilter, Containe
                 return;
             }
             ctx.setProperty(OPERATION, operation);
-            JsonNode parameters = recordBuilder.parameters(operation.eventSource(), operation.name(), false,
-                    input(operation, ctx));
+            JsonNode parameters = recordBuilder.parameters(operation, false, input(operation, ctx));
             if (parameters != null && !parameters.isEmpty()) {
                 ctx.setProperty(PARAMETERS, parameters);
             }
@@ -154,7 +153,7 @@ public class CloudTrailCaptureFilter implements ContainerRequestFilter, Containe
             errorCode = error[0];
             errorMessage = error[1];
         } else if (!CloudTrailRecordBuilder.isReadOnly(operation.eventSource(), operation.name())) {
-            responseElements = recordBuilder.parameters(operation.eventSource(), operation.name(), true,
+            responseElements = recordBuilder.parameters(operation, true,
                     output(operation, response.getEntity()));
         }
         HttpServerRequest request = null;
@@ -326,7 +325,6 @@ public class CloudTrailCaptureFilter implements ContainerRequestFilter, Containe
     }
 
     private static String protocol(Operation operation) {
-        return AwsOperationModels.models().stream().filter(info -> info.name().equals(operation.model()))
-                .findFirst().map(AwsOperationModels.ModelInfo::protocol).orElse("");
+        return AwsOperationModels.info(operation.model()).protocol();
     }
 }

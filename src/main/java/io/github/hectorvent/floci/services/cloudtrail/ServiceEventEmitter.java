@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudtrail;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.OperationResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.cloudtrail.record.CloudTrailEvent;
 import io.github.hectorvent.floci.services.cloudtrail.record.CloudTrailRecordBuilder;
@@ -23,7 +24,8 @@ import java.util.UUID;
 public class ServiceEventEmitter {
 
     private static final Logger LOG = Logger.getLogger(ServiceEventEmitter.class);
-    private static final String STS = ServicePrincipals.of("sts");
+    private static final OperationResolver.Operation ASSUME_ROLE =
+            new OperationResolver.Operation("sts", ServicePrincipals.of("sts"), "AssumeRole");
 
     private final CloudTrailRecordBuilder recordBuilder;
     private final UserIdentityBuilder userIdentityBuilder;
@@ -67,15 +69,15 @@ public class ServiceEventEmitter {
             assumedRoleUser.put("Arn", AwsArnUtils.Arn.global(role.partition(), "sts", role.accountId(),
                     "assumed-role/" + roleName + "/" + sessionName).toString());
             recorder.record(recordBuilder.build(CloudTrailEvent.builder()
-                    .eventSource(STS)
-                    .eventName("AssumeRole")
+                    .eventSource(ASSUME_ROLE.eventSource())
+                    .eventName(ASSUME_ROLE.name())
                     .awsRegion(region)
                     .eventTime(Instant.now())
                     .userIdentity(userIdentityBuilder.forService(principal))
                     .sourceIPAddress(principal)
                     .userAgent(principal)
-                    .requestParameters(recordBuilder.parameters(STS, "AssumeRole", false, input))
-                    .responseElements(recordBuilder.parameters(STS, "AssumeRole", true, output))
+                    .requestParameters(recordBuilder.parameters(ASSUME_ROLE, false, input))
+                    .responseElements(recordBuilder.parameters(ASSUME_ROLE, true, output))
                     .requestId(UUID.randomUUID().toString())
                     .recipientAccountId(role.accountId())
                     .build()));
