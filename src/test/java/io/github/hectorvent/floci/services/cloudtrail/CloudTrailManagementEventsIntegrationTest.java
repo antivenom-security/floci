@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudtrail;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -149,6 +150,12 @@ class CloudTrailManagementEventsIntegrationTest {
         assertEquals(session.accessKeyId(),
                 assume.path("responseElements").path("credentials").path("accessKeyId").asText());
         assertThat(assume.toString(), not(containsString(session.sessionToken())));
+        assertTrue(assume.path("readOnly").asBoolean());
+        assertEquals("HIDDEN_DUE_TO_SECURITY_REASONS",
+                assume.path("responseElements").path("credentials").path("secretAccessKey").asText());
+        assertTrue(lookup(LookupAttributeKey.READ_ONLY, "true").stream()
+                .anyMatch(event -> "AssumeRole".equals(event.eventName())
+                        && event.cloudTrailEvent().contains(session.accessKeyId())));
         assertEquals("AWS::IAM::Role", assume.path("resources").path(0).path("type").asText());
 
         try (IamClient iam = iam(AwsSessionCredentials.create(session.accessKeyId(), session.secretAccessKey(),
@@ -201,15 +208,97 @@ class CloudTrailManagementEventsIntegrationTest {
             iam.createUser(r -> r.userName("included-" + suffix()));
             cloudTrail.stopLogging(r -> r.name(trailName));
 
-            CloudTrailService.TrailKey key = new CloudTrailService.TrailKey("us-east-1", trailName, "us-east-1");
-            List<String> sources = trails.drainPendingRecords(key).stream()
-                    .map(record -> record.path("eventSource").asText()).toList();
-            trails.completeDelivery(key);
+            List<String> sources = drain(trailName).stream().map(record -> record.path("eventSource").asText()).toList();
             assertTrue(sources.contains("iam.amazonaws.com"), sources.toString());
             assertThat(sources, everyItem(not(containsString("kms"))));
             assertFalse(lookup(LookupAttributeKey.EVENT_NAME, "CreateKey").isEmpty());
             cloudTrail.deleteTrail(r -> r.name(trailName));
         }
+    }
+
+    @Test
+    void writeOnlyTrailWithoutGlobalEventsSkipsAssumeRoleAndIam() throws Exception {
+        String trailName = "write-" + suffix();
+        User admin = adminUser();
+        String roleName = "wo-" + suffix();
+        try (CloudTrailClient cloudTrail = cloudTrail(AwsBasicCredentials.create("test", "test"), true);
+             IamClient iam = iam(admin.keys());
+             StsClient sts = StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                     .credentialsProvider(StaticCredentialsProvider.create(admin.keys()))
+                     .httpClient(UrlConnectionHttpClient.create()).build();
+             SecretsManagerClient secrets = SecretsManagerClient.builder().endpointOverride(endpoint)
+                     .region(Region.US_EAST_1).credentialsProvider(StaticCredentialsProvider.create(admin.keys()))
+                     .httpClient(UrlConnectionHttpClient.create()).build()) {
+            String roleArn = iam.createRole(r -> r.roleName(roleName).assumeRolePolicyDocument("""
+                    {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                      "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}""".formatted(ACCOUNT)))
+                    .role().arn();
+            cloudTrail.createTrail(r -> r.name(trailName).s3BucketName("trail-bucket-" + suffix())
+                    .includeGlobalServiceEvents(false));
+            cloudTrail.putEventSelectors(r -> r.trailName(trailName).eventSelectors(s -> s.readWriteType("WriteOnly")));
+            cloudTrail.startLogging(r -> r.name(trailName));
+            sts.assumeRole(r -> r.roleArn(roleArn).roleSessionName("wo"));
+            iam.createUser(r -> r.userName("global-" + suffix()));
+            secrets.createSecret(r -> r.name("regional-" + suffix()).secretString("x"));
+            cloudTrail.stopLogging(r -> r.name(trailName));
+
+            List<String> names = drain(trailName).stream().map(record -> record.path("eventName").asText()).toList();
+            assertTrue(names.contains("CreateSecret"), names.toString());
+            assertFalse(names.contains("AssumeRole"), names.toString());
+            assertFalse(names.contains("CreateUser"), names.toString());
+            cloudTrail.deleteTrail(r -> r.name(trailName));
+        }
+    }
+
+    @Test
+    void serviceEventsRouteToTheRecipientAccountsTrails() throws Exception {
+        String other = "111111111111";
+        String otherTrail = "acct-" + suffix();
+        String defaultTrail = "dflt-" + suffix();
+        String roleName = "x-" + suffix();
+        String roleArn;
+        try (IamClient iam = iam(AwsBasicCredentials.create(other, "test"));
+             CloudTrailClient otherCloudTrail = cloudTrail(AwsBasicCredentials.create(other, "test"), true);
+             CloudTrailClient cloudTrail = cloudTrail(AwsBasicCredentials.create("test", "test"), true)) {
+            roleArn = iam.createRole(r -> r.roleName(roleName).assumeRolePolicyDocument("""
+                    {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                      "Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}"""))
+                    .role().arn();
+            otherCloudTrail.createTrail(r -> r.name(otherTrail).s3BucketName("trail-bucket-" + suffix()));
+            otherCloudTrail.startLogging(r -> r.name(otherTrail));
+            cloudTrail.createTrail(r -> r.name(defaultTrail).s3BucketName("trail-bucket-" + suffix()));
+            cloudTrail.startLogging(r -> r.name(defaultTrail));
+
+            String taskArn = "arn:aws:ecs:us-east-1:" + other + ":task/c/" + suffix();
+            assertTrue(ecsTaskRoleCredentials.issue(taskArn, roleArn, other, Instant.now()).isPresent());
+            ecsTaskRoleCredentials.revoke(taskArn);
+            otherCloudTrail.stopLogging(r -> r.name(otherTrail));
+            cloudTrail.stopLogging(r -> r.name(defaultTrail));
+
+            assertTrue(drain(otherTrail).stream().anyMatch(record -> record.toString().contains(roleArn)));
+            assertFalse(drain(defaultTrail).stream().anyMatch(record -> record.toString().contains(roleArn)));
+            otherCloudTrail.deleteTrail(r -> r.name(otherTrail));
+            cloudTrail.deleteTrail(r -> r.name(defaultTrail));
+        }
+    }
+
+    @Test
+    void emptyEventSelectorsAreRejected() {
+        String trailName = "empty-" + suffix();
+        try (CloudTrailClient cloudTrail = cloudTrail(AwsBasicCredentials.create("test", "test"), true)) {
+            cloudTrail.createTrail(r -> r.name(trailName).s3BucketName("trail-bucket-" + suffix()));
+            CloudTrailException thrown = assertThrows(CloudTrailException.class,
+                    () -> cloudTrail.putEventSelectors(r -> r.trailName(trailName).eventSelectors(List.of())));
+            assertEquals("InvalidEventSelectorsException", thrown.awsErrorDetails().errorCode());
+            cloudTrail.deleteTrail(r -> r.name(trailName));
+        }
+    }
+
+    private List<ObjectNode> drain(String trailName) {
+        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey("us-east-1", trailName, "us-east-1");
+        List<ObjectNode> records = trails.drainPendingRecords(key);
+        trails.completeDelivery(key);
+        return records;
     }
 
     @Test

@@ -906,7 +906,7 @@ floci:
         enabled: true
       event-history:
         retention-days: 90
-        max-events: 200000
+        max-events: 20000
       lookup-rate-limit-per-second: 2
       trust-forwarded-for: false
     lightsail:

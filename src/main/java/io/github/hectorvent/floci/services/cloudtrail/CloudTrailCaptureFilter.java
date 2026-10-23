@@ -5,13 +5,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsOperationModels;
-import io.github.hectorvent.floci.core.common.AwsPartition;
-import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.OperationResolver;
 import io.github.hectorvent.floci.core.common.OperationResolver.Operation;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.ResolvedServiceCatalog;
-import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.XmlParser.XmlElement;
@@ -112,7 +109,7 @@ public class CloudTrailCaptureFilter implements ContainerRequestFilter, Containe
         String auth = ctx.getHeaderString("Authorization");
         String scope = auth == null ? null
                 : SigV4CredentialScope.serviceName(auth).map(catalog::canonicalCredentialScope).orElse(null);
-        if (scope == null) {
+        if (scope == null || (isFormPost(ctx) && overCap(ctx))) {
             return;
         }
         try {
@@ -152,7 +149,8 @@ public class CloudTrailCaptureFilter implements ContainerRequestFilter, Containe
             String[] error = error(response);
             errorCode = error[0];
             errorMessage = error[1];
-        } else if (!CloudTrailRecordBuilder.isReadOnly(operation.eventSource(), operation.name())) {
+        } else if (!CloudTrailRecordBuilder.isReadOnly(operation.eventSource(), operation.name())
+                || CloudTrailRecordBuilder.keepsResponse(operation.eventSource(), operation.name())) {
             responseElements = recordBuilder.parameters(operation, true,
                     output(operation, response.getEntity()));
         }
@@ -183,10 +181,8 @@ public class CloudTrailCaptureFilter implements ContainerRequestFilter, Containe
 
     /** Global services record in their partition's signing region, as IAM does in us-east-1. */
     private static String eventRegion(String eventSource, String region) {
-        return AwsPartitions.forRegionOrCommercial(region).globalEndpoint(ServicePrincipals.serviceName(eventSource))
-                .filter(endpoint -> !endpoint.regionalized())
-                .map(AwsPartition.GlobalEndpoint::signingRegion)
-                .orElse(region);
+        String global = TrailRouter.globalSigningRegion(eventSource, region);
+        return global != null ? global : region;
     }
 
     private JsonNode input(Operation operation, ContainerRequestContext ctx) {
@@ -291,16 +287,24 @@ public class CloudTrailCaptureFilter implements ContainerRequestFilter, Containe
     }
 
     private static byte[] body(ContainerRequestContext ctx) {
-        int length = ctx.getLength();
-        return length < 0 || length > MAX_CAPTURED_BODY_BYTES ? null : RequestBodyReader.buffer(ctx);
+        return overCap(ctx) ? null : RequestBodyReader.buffer(ctx);
+    }
+
+    private static boolean overCap(ContainerRequestContext ctx) {
+        return ctx.getLength() < 0 || ctx.getLength() > MAX_CAPTURED_BODY_BYTES;
+    }
+
+    /** A Query form POST names its operation in the body, so resolving it buffers the body. */
+    private static boolean isFormPost(ContainerRequestContext ctx) {
+        return !"GET".equalsIgnoreCase(ctx.getMethod()) && ctx.getMediaType() != null
+                && ctx.getMediaType().isCompatible(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
     }
 
     private static Map<String, String> form(ContainerRequestContext ctx) {
         Map<String, String> form = new LinkedHashMap<>();
         if ("GET".equalsIgnoreCase(ctx.getMethod())) {
             ctx.getUriInfo().getQueryParameters().forEach((key, values) -> form.put(key, values.getFirst()));
-        } else if (ctx.getMediaType() != null
-                && ctx.getMediaType().isCompatible(MediaType.APPLICATION_FORM_URLENCODED_TYPE)) {
+        } else if (isFormPost(ctx)) {
             byte[] body = body(ctx);
             String encoded = body == null ? "" : new String(body, StandardCharsets.UTF_8);
             for (String pair : encoded.split("&")) {

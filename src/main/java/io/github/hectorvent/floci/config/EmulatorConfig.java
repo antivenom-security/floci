@@ -1258,7 +1258,7 @@ public interface EmulatorConfig {
         int retentionDays();
 
         /** Oldest events are evicted past this many, across all accounts and regions. */
-        @WithDefault("200000")
+        @WithDefault("20000")
         int maxEvents();
     }
 
