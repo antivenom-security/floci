@@ -532,6 +532,8 @@ floci:
       seed-landing-zone: true
     route53resolver:
       enabled: true
+      query-log-s3-interval-seconds: 300
+      query-log-cloudwatch-interval-seconds: 60
     connect:
       enabled: true
     appintegrations:

@@ -178,6 +178,13 @@ public class SecurityGroupFirewallManager {
         }
     }
 
+    /** The managed ENI whose namespace holds {@code transportAddress} on Docker, if any. */
+    public synchronized Optional<SecurityGroupNftCompiler.Endpoint> endpointAt(String transportAddress) {
+        return endpoints.values().stream().map(ProtectedEndpoint::endpoint)
+                .filter(endpoint -> endpoint.transportAddress().equals(transportAddress))
+                .findFirst();
+    }
+
     public synchronized void unregister(String eniId) {
         ProtectedEndpoint removed = endpoints.remove(eniId);
         if (removed != null) {

@@ -26,9 +26,11 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
@@ -105,6 +107,7 @@ public class EmbeddedDnsServer {
     private final Iterable<DnsRecordSource> recordSources;
     private final Iterable<DnsForwardingRuleSource> forwardingRuleSources;
     private final Iterable<DnsClientVpcSource> clientVpcSources;
+    private final Iterable<DnsQueryObserver> queryObservers;
 
     EmbeddedDnsServer(List<String> suffixes) {
         this(suffixes, List.of());
@@ -133,21 +136,31 @@ public class EmbeddedDnsServer {
     EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources,
                       Iterable<DnsForwardingRuleSource> forwardingRuleSources,
                       Iterable<DnsClientVpcSource> clientVpcSources) {
+        this(suffixes, recordSources, forwardingRuleSources, clientVpcSources, List.of());
+    }
+
+    EmbeddedDnsServer(List<String> suffixes, Iterable<DnsRecordSource> recordSources,
+                      Iterable<DnsForwardingRuleSource> forwardingRuleSources,
+                      Iterable<DnsClientVpcSource> clientVpcSources,
+                      Iterable<DnsQueryObserver> queryObservers) {
         this.suffixes.addAll(BUILTIN_SUFFIXES);
         this.suffixes.addAll(suffixes);
         this.recordSources = recordSources;
         this.forwardingRuleSources = forwardingRuleSources;
         this.clientVpcSources = clientVpcSources;
+        this.queryObservers = queryObservers;
     }
 
     @Inject
     public EmbeddedDnsServer(EmulatorConfig config, ContainerDetector containerDetector, Vertx vertx,
                              Instance<DnsRecordSource> recordSources,
                              Instance<DnsForwardingRuleSource> forwardingRuleSources,
-                             Instance<DnsClientVpcSource> clientVpcSources) {
+                             Instance<DnsClientVpcSource> clientVpcSources,
+                             Instance<DnsQueryObserver> queryObservers) {
         this.recordSources = recordSources;
         this.forwardingRuleSources = forwardingRuleSources;
         this.clientVpcSources = clientVpcSources;
+        this.queryObservers = queryObservers;
         if (!containerDetector.isRunningInContainer()) {
             return;
         }
@@ -233,11 +246,74 @@ public class EmbeddedDnsServer {
                                 ? buildAResponse(data, txId, questionOffset, questionEnd, records)
                                 : buildEmptyResponse(data, txId, questionOffset, questionEnd,
                                         records.nameExists() ? 0 : 3);
-                        socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
+                        reply(vertx, socket, response, senderHost, senderPort);
                     })
                     .onFailure(e -> LOG.warnv("DNS record lookup failed for {0}: {1}", qname, e.getMessage()));
         } catch (Exception e) {
             LOG.debugv("DNS packet error: {0}", e.getMessage());
+        }
+    }
+
+    private void reply(Vertx vertx, DatagramSocket socket, byte[] response, String senderHost, int senderPort) {
+        socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
+        if (queryObservers == null || !queryObservers.iterator().hasNext()) {
+            return;
+        }
+        Instant answeredAt = Instant.now();
+        vertx.executeBlocking(() -> {
+            DnsQueryObserver.Query query = parseExchange(answeredAt, senderHost, senderPort, response);
+            for (DnsQueryObserver observer : queryObservers) {
+                try {
+                    observer.observe(query);
+                } catch (Exception e) {
+                    LOG.debugv("DNS query observer {0} failed for {1}: {2}",
+                            observer.getClass().getSimpleName(), query.name(), e.getMessage());
+                }
+            }
+            return null;
+        }, false).onFailure(e -> LOG.debugv("Could not observe DNS response for {0}: {1}",
+                senderHost, e.getMessage()));
+    }
+
+    /** The query and the answer the client received, both read from the response it was sent. */
+    static DnsQueryObserver.Query parseExchange(Instant timestamp, String senderHost, int senderPort,
+                                                byte[] response) {
+        ByteBuffer buf = ByteBuffer.wrap(response);
+        buf.getShort();
+        int responseCode = buf.getShort() & 0x000F;
+        buf.getShort();
+        int answerCount = Short.toUnsignedInt(buf.getShort());
+        buf.getShort();
+        buf.getShort();
+        String name = readName(buf, response);
+        int type = Short.toUnsignedInt(buf.getShort());
+        int queryClass = Short.toUnsignedInt(buf.getShort());
+        List<DnsQueryObserver.Answer> answers = new ArrayList<>();
+        for (int i = 0; i < answerCount; i++) {
+            readName(buf, response);
+            int answerType = Short.toUnsignedInt(buf.getShort());
+            int answerClass = Short.toUnsignedInt(buf.getShort());
+            buf.getInt();
+            int length = Short.toUnsignedInt(buf.getShort());
+            int start = buf.position();
+            answers.add(new DnsQueryObserver.Answer(rdata(response, start, length, answerType),
+                    answerType, answerClass));
+            buf.position(start + length);
+        }
+        return new DnsQueryObserver.Query(timestamp, senderHost, senderPort, name, type, queryClass,
+                responseCode, answers);
+    }
+
+    private static String rdata(byte[] message, int start, int length, int type) {
+        try {
+            return switch (type) {
+                case 1, 28 -> InetAddress.getByAddress(Arrays.copyOfRange(message, start, start + length))
+                        .getHostAddress();
+                case 2, 5, 12 -> readName(ByteBuffer.wrap(message).position(start), message) + ".";
+                default -> "\\# " + length + " " + HexFormat.of().formatHex(message, start, start + length);
+            };
+        } catch (IOException e) {
+            return "\\# " + length;
         }
     }
 
@@ -636,8 +712,7 @@ public class EmbeddedDnsServer {
             return;
         }
         submitForward(forwardPool(vertx), () -> forwardToUpstreams(query, upstreams, DNS_PORT))
-                .onSuccess(response ->
-                        socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {}))
+                .onSuccess(response -> reply(vertx, socket, response, senderHost, senderPort))
                 .onFailure(e ->
                         LOG.warnv("DNS forwarding failed on all upstreams {0}: {1}",
                                 upstreams, e.getMessage()));
@@ -657,14 +732,12 @@ public class EmbeddedDnsServer {
                                       List<DnsForwardingRule.Target> targets, String qname,
                                       short txId, int questionOffset, int questionEnd) {
         submitForward(forwardPool(vertx), () -> forwardToTargets(query, shuffled(targets)))
-                .onSuccess(response ->
-                        socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {}))
+                .onSuccess(response -> reply(vertx, socket, response, senderHost, senderPort))
                 .onFailure(e -> {
                     LOG.warnv("Resolver rule forwarding for {0} failed on every target {1}: {2}",
                             qname, targets, e.getMessage());
-                    socket.send(Buffer.buffer(
-                                    buildServerFailureResponse(query, txId, questionOffset, questionEnd)),
-                            senderPort, senderHost, v -> {});
+                    reply(vertx, socket, buildServerFailureResponse(query, txId, questionOffset, questionEnd),
+                            senderHost, senderPort);
                 });
     }
 
