@@ -32,6 +32,7 @@ import io.vertx.core.datagram.DatagramSocket;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -86,6 +87,7 @@ class QueryLogDnsDockerIntegrationTest {
     @Inject Vertx vertx;
 
     @Test
+    @Timeout(300)
     void taskQueriesLandInS3UnderTheVpcOnlyWhileAssociated() throws Exception {
         Assumptions.assumeTrue(firewall.enabled());
         try {
