@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.iam.IamService.SessionContextInfo;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -33,12 +34,14 @@ public class UserIdentityBuilder {
     private final IamService iamService;
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
+    private final Clock clock;
 
     @Inject
-    public UserIdentityBuilder(IamService iamService, RegionResolver regionResolver, ObjectMapper mapper) {
+    public UserIdentityBuilder(IamService iamService, RegionResolver regionResolver, ObjectMapper mapper, Clock clock) {
         this.iamService = iamService;
         this.regionResolver = regionResolver;
         this.mapper = mapper;
+        this.clock = clock;
     }
 
     /** The identity of a request signed with {@code accessKeyId}; an unsigned request is AWS's anonymous caller. */
@@ -53,6 +56,9 @@ public class UserIdentityBuilder {
         if ("test".equals(accessKeyId) || ACCOUNT_ID.matcher(accessKeyId).matches()) {
             return root(ACCOUNT_ID.matcher(accessKeyId).matches() ? accessKeyId : regionResolver.getAccountId(),
                     accessKeyId);
+        }
+        if (iamService.isExpiredSession(accessKeyId, clock.instant())) {
+            return unknown(accessKeyId);
         }
         CallerArns caller = iamService.resolveCallerArns(accessKeyId).orElse(null);
         if (caller == null || caller.principalType() == null) {

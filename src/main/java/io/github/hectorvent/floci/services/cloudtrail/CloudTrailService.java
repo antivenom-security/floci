@@ -32,6 +32,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -78,7 +79,7 @@ public class CloudTrailService {
     CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
                       IamService iamService, ObjectMapper mapper, CloudTrailEventBridgeForwarder eventBridge) {
         this(storageFactory, regionResolver, mapper, new CloudTrailRecordBuilder(mapper),
-                new UserIdentityBuilder(iamService, regionResolver, mapper), eventBridge, null);
+                new UserIdentityBuilder(iamService, regionResolver, mapper, Clock.systemUTC()), eventBridge, null);
     }
 
     @Inject
