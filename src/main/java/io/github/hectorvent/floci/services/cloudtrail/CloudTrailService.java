@@ -38,7 +38,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
@@ -158,7 +157,9 @@ public class CloudTrailService {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         String key = regionKey(trail.homeRegion(), trail.name());
         withTrailLock(key, () -> store.delete(key));
-        pendingRecordsByTrail.keySet().removeIf(k -> k.trailName().equals(trail.name()));
+        String accountId = regionResolver.getAccountId();
+        pendingRecordsByTrail.keySet().removeIf(k -> k.accountId().equals(accountId)
+                && k.trailName().equals(trail.name()));
     }
 
     public Trail updateTrail(String region, String trailNameOrArn,
@@ -306,20 +307,21 @@ public class CloudTrailService {
                 .orElse(new TrailStatus(false, null, null, null, null, null));
     }
 
-    /** Every trail that is logging, with the time it started. */
-    public List<CloudTrailEntry> loggingTrails() {
-        List<CloudTrailEntry> result = new ArrayList<>();
-        for (String k : store.keys()) {
-            store.get(k).filter(CloudTrailEntry::logging).ifPresent(result::add);
-        }
-        return result;
+    /** Every trail that is logging, in every account, with the time it started. */
+    public List<AccountAwareStorageBackend.AccountEntry<CloudTrailEntry>> loggingTrails() {
+        return store.scanAllAccountEntries(k -> true).stream().filter(e -> e.value().logging()).toList();
     }
 
-    public void updateChannels(String trailRegion, String trailName,
+    public void updateChannels(String accountId, String trailRegion, String trailName,
                                UnaryOperator<CloudTrailEntry.ChannelStatus> update) {
+        updateEntry(accountId, trailRegion, trailName, entry -> entry.withChannels(update.apply(entry.channels())));
+    }
+
+    private void updateEntry(String accountId, String trailRegion, String trailName,
+                             UnaryOperator<CloudTrailEntry> update) {
         String storeKey = regionKey(trailRegion, trailName);
-        withTrailLock(storeKey, () -> store.get(storeKey)
-                .ifPresent(entry -> store.put(storeKey, entry.withChannels(update.apply(entry.channels())))));
+        withTrailLock(storeKey, () -> store.getForAccount(accountId, storeKey)
+                .ifPresent(entry -> store.putForAccount(accountId, storeKey, update.apply(entry))));
     }
 
     void onBufferFull(Runnable listener) {
@@ -476,14 +478,15 @@ public class CloudTrailService {
     public void emitS3DataEvent(S3EventInput in) {
         try {
             String region = in.region() != null ? in.region() : regionResolver.getDefaultRegion();
-            List<MatchedTrail> matched = trailsMatching(region, in);
+            String accountId = in.accountId() != null ? in.accountId() : regionResolver.getAccountId();
+            List<MatchedTrail> matched = trailsMatching(accountId, region, in);
             if (matched.isEmpty()) {
                 return;
             }
-            ObjectNode record = buildS3Record(in, region);
+            ObjectNode record = buildS3Record(in, region, accountId);
             for (MatchedTrail mt : matched) {
                 ObjectNode copy = record.deepCopy();
-                boolean accepted = append(new TrailKey(mt.region(), mt.trail().name(), region), copy);
+                boolean accepted = append(new TrailKey(accountId, mt.region(), mt.trail().name(), region), copy);
                 if (accepted) {
                     LOG.tracev("Emitted CloudTrail event {0} for trail {1}", in.eventName(), mt.trail().name());
                 } else {
@@ -518,7 +521,7 @@ public class CloudTrailService {
                     eventSource, readOnly)) {
                 continue;
             }
-            if (!append(new TrailKey(trailRegion, entry.trail().name(), eventRegion), record.deepCopy())) {
+            if (!append(new TrailKey(accountId, trailRegion, entry.trail().name(), eventRegion), record.deepCopy())) {
                 LOG.debugv("Dropped CloudTrail event {0} for trail {1}: delivery is failing and the buffer is full",
                         record.path("eventName").asText(), entry.trail().name());
             }
@@ -575,7 +578,8 @@ public class CloudTrailService {
         List<TrailKey> result = new ArrayList<>();
         for (Map.Entry<PendingTrailKey, PendingRecordBuffer> e : pendingRecordsByTrail.entrySet()) {
             for (String eventRegion : e.getValue().eventRegions()) {
-                result.add(new TrailKey(e.getKey().region(), e.getKey().trailName(), eventRegion));
+                result.add(new TrailKey(e.getKey().accountId(), e.getKey().region(), e.getKey().trailName(),
+                        eventRegion));
             }
         }
         return result;
@@ -586,8 +590,8 @@ public class CloudTrailService {
         return buffer == null ? 0 : buffer.pendingCount(key.eventRegion());
     }
 
-    public Trail getTrail(String region, String trailName) {
-        return store.get(regionKey(region, trailName))
+    public Trail getTrail(TrailKey key) {
+        return store.getForAccount(key.accountId(), regionKey(key.region(), key.trailName()))
                 .map(CloudTrailEntry::trail)
                 .orElse(null);
     }
@@ -600,9 +604,8 @@ public class CloudTrailService {
         updateDeliveryStatus(key, entry -> entry.withDeliverySuccess(time));
     }
 
-    private void updateDeliveryStatus(TrailKey key, Function<CloudTrailEntry, CloudTrailEntry> update) {
-        String storeKey = regionKey(key.region(), key.trailName());
-        withTrailLock(storeKey, () -> store.get(storeKey).ifPresent(entry -> store.put(storeKey, update.apply(entry))));
+    private void updateDeliveryStatus(TrailKey key, UnaryOperator<CloudTrailEntry> update) {
+        updateEntry(key.accountId(), key.region(), key.trailName(), update);
     }
 
     /**
@@ -640,9 +643,9 @@ public class CloudTrailService {
      * {@code eventRegion} is the region where the event occurred (used for the S3 delivery path).
      * For single-region trails these are the same; for multi-region trails they differ.
      */
-    public record TrailKey(String region, String trailName, String eventRegion) {}
+    public record TrailKey(String accountId, String region, String trailName, String eventRegion) {}
 
-    private record PendingTrailKey(String region, String trailName) {}
+    private record PendingTrailKey(String accountId, String region, String trailName) {}
 
     private record PendingRecord(ObjectNode record, long byteCount) {}
 
@@ -779,20 +782,20 @@ public class CloudTrailService {
     }
 
     private static PendingTrailKey pendingTrailKey(TrailKey key) {
-        return new PendingTrailKey(key.region(), key.trailName());
+        return new PendingTrailKey(key.accountId(), key.region(), key.trailName());
     }
 
     // --- Helpers ---
 
-    private List<MatchedTrail> trailsMatching(String region, S3EventInput in) {
+    private List<MatchedTrail> trailsMatching(String accountId, String region, S3EventInput in) {
         List<MatchedTrail> result = new ArrayList<>();
-        for (String k : store.keys()) {
-            String trailRegion = regionFromKey(k);
-            boolean sameRegion = trailRegion.equals(region);
-            CloudTrailEntry entry = store.get(k).orElse(null);
-            if (entry == null) {
+        for (AccountAwareStorageBackend.AccountEntry<CloudTrailEntry> stored : store.scanAllAccountEntries(k -> true)) {
+            if (!stored.accountId().equals(accountId)) {
                 continue;
             }
+            String trailRegion = regionFromKey(stored.key());
+            boolean sameRegion = trailRegion.equals(region);
+            CloudTrailEntry entry = stored.value();
             Trail trail = entry.trail();
             if (!sameRegion && !trail.isMultiRegionTrail()) {
                 continue;
@@ -955,12 +958,11 @@ public class CloudTrailService {
      * rather than from the request scope, because the log writer emits its own deliveries from the
      * flush thread, where the request region falls back to the deployment default.
      */
-    private ObjectNode buildS3Record(S3EventInput in, String region) {
+    private ObjectNode buildS3Record(S3EventInput in, String region, String accountId) {
         String s3Host = in.bucketName() == null
                 ? "s3." + AwsRegions.dnsSuffixFor(region)
                 : AwsEndpoints.s3Host(in.bucketName(), region);
         String partition = AwsRegions.partitionFor(region);
-        String accountId = regionResolver.getAccountId();
 
         ObjectNode reqParams = mapper.createObjectNode();
         if (in.bucketName() != null) reqParams.put("bucketName", in.bucketName());
@@ -1105,7 +1107,8 @@ public class CloudTrailService {
             long eventTimeMillis,
             String requestId,
             TlsDetails tlsDetails,
-            String invokedBy) {
+            String invokedBy,
+            String accountId) {
 
         public static Builder builder() { return new Builder(); }
 
@@ -1125,6 +1128,7 @@ public class CloudTrailService {
             private String requestId;
             private TlsDetails tlsDetails;
             private String invokedBy;
+            private String accountId;
 
             public Builder region(String v) { this.region = v; return this; }
             public Builder eventName(String v) { this.eventName = v; return this; }
@@ -1142,11 +1146,13 @@ public class CloudTrailService {
             public Builder tlsDetails(TlsDetails v) { this.tlsDetails = v; return this; }
             /** The service principal of an action an AWS service took on its own. */
             public Builder invokedBy(String v) { this.invokedBy = v; return this; }
+            /** The account whose trails see the event, when not the request's, as for CloudTrail's own writes. */
+            public Builder accountId(String v) { this.accountId = v; return this; }
 
             public S3EventInput build() {
                 return new S3EventInput(region, eventName, bucketName, key, accessKeyId,
                         sourceIp, userAgent, bytesIn, bytesOut,
-                        errorCode, errorMessage, eventTimeMillis, requestId, tlsDetails, invokedBy);
+                        errorCode, errorMessage, eventTimeMillis, requestId, tlsDetails, invokedBy, accountId);
             }
         }
     }

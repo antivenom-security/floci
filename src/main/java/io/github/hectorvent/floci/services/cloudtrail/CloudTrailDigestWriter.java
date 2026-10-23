@@ -6,8 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Digests;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -73,9 +72,8 @@ public class CloudTrailDigestWriter {
     private final EmulatorConfig config;
     private final CloudTrailService cloudTrailService;
     private final S3Service s3Service;
-    private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
-    private final StorageBackend<String, DigestKey> keys;
+    private final AccountAwareStorageBackend<DigestKey> keys;
     private final Map<ChainKey, Chain> chains = new ConcurrentHashMap<>();
     private final Map<ChainKey, List<LogFile>> pending = new ConcurrentHashMap<>();
 
@@ -83,11 +81,10 @@ public class CloudTrailDigestWriter {
 
     @Inject
     public CloudTrailDigestWriter(EmulatorConfig config, CloudTrailService cloudTrailService, S3Service s3Service,
-                                  RegionResolver regionResolver, ObjectMapper mapper, StorageFactory storageFactory) {
+                                  ObjectMapper mapper, StorageFactory storageFactory) {
         this.config = config;
         this.cloudTrailService = cloudTrailService;
         this.s3Service = s3Service;
-        this.regionResolver = regionResolver;
         this.mapper = mapper;
         this.keys = storageFactory.create("cloudtrail", "cloudtrail-digest-keys.json",
                 new TypeReference<Map<String, DigestKey>>() {});
@@ -124,7 +121,8 @@ public class CloudTrailDigestWriter {
             newest = newest == null || time.compareTo(newest) > 0 ? time : newest;
         }
         LogFile file = new LogFile(bucket, objectKey, Digests.sha256Hex(json), oldest, newest);
-        pending.compute(new ChainKey(key.region(), key.trailName(), key.eventRegion()), (ignored, files) -> {
+        ChainKey chainKey = new ChainKey(key.accountId(), key.region(), key.trailName(), key.eventRegion());
+        pending.compute(chainKey, (ignored, files) -> {
             List<LogFile> updated = files == null ? new ArrayList<>() : files;
             updated.add(file);
             return updated;
@@ -133,7 +131,9 @@ public class CloudTrailDigestWriter {
 
     public void writeDigests() {
         Instant end = Instant.now().truncatedTo(ChronoUnit.SECONDS);
-        for (CloudTrailEntry entry : cloudTrailService.loggingTrails()) {
+        for (AccountAwareStorageBackend.AccountEntry<CloudTrailEntry> stored : cloudTrailService.loggingTrails()) {
+            String account = stored.accountId();
+            CloudTrailEntry entry = stored.value();
             Trail trail = entry.trail();
             if (!trail.logFileValidationEnabled()) {
                 continue;
@@ -141,37 +141,37 @@ public class CloudTrailDigestWriter {
             Set<String> regions = new LinkedHashSet<>();
             regions.add(trail.homeRegion());
             for (ChainKey key : chains.keySet()) {
-                addRegionOf(trail, key, regions);
+                addRegionOf(account, trail, key, regions);
             }
             for (ChainKey key : pending.keySet()) {
-                addRegionOf(trail, key, regions);
+                addRegionOf(account, trail, key, regions);
             }
             for (String region : regions) {
                 try {
-                    writeDigest(trail, entry.startLoggingTime(), region, end);
-                    cloudTrailService.updateChannels(trail.homeRegion(), trail.name(),
+                    writeDigest(account, trail, entry.startLoggingTime(), region, end);
+                    cloudTrailService.updateChannels(account, trail.homeRegion(), trail.name(),
                             c -> c.digest(end.toEpochMilli(), null));
                 } catch (RuntimeException e) {
                     LOG.warnv(e, "CloudTrail digest delivery failed for trail {0} in {1}", trail.name(), region);
                     String error = e.getMessage();
-                    cloudTrailService.updateChannels(trail.homeRegion(), trail.name(),
+                    cloudTrailService.updateChannels(account, trail.homeRegion(), trail.name(),
                             c -> c.digest(c.digestDeliveryTime(), error));
                 }
             }
         }
     }
 
-    private static void addRegionOf(Trail trail, ChainKey key, Set<String> regions) {
-        if (key.trailRegion().equals(trail.homeRegion()) && key.trailName().equals(trail.name())) {
+    private static void addRegionOf(String account, Trail trail, ChainKey key, Set<String> regions) {
+        if (key.accountId().equals(account) && key.trailRegion().equals(trail.homeRegion())
+                && key.trailName().equals(trail.name())) {
             regions.add(key.region());
         }
     }
 
-    private void writeDigest(Trail trail, Long startLoggingTime, String region, Instant end) {
-        ChainKey chainKey = new ChainKey(trail.homeRegion(), trail.name(), region);
+    private void writeDigest(String account, Trail trail, Long startLoggingTime, String region, Instant end) {
+        ChainKey chainKey = new ChainKey(account, trail.homeRegion(), trail.name(), region);
         Chain previous = chains.get(chainKey);
         List<LogFile> files = drainPending(chainKey);
-        String account = regionResolver.getAccountId();
         String bucket = trail.s3BucketName();
         String objectKey = CloudTrailService.keyPrefix(trail.s3KeyPrefix()) + "AWSLogs/" + account
                 + "/CloudTrail-Digest/" + region + "/" + PATH_DATE.format(end) + "/" + account
@@ -180,7 +180,7 @@ public class CloudTrailDigestWriter {
         Instant start = previous != null ? previous.end()
                 : Instant.ofEpochMilli(startLoggingTime != null ? startLoggingTime : end.toEpochMilli())
                 .truncatedTo(ChronoUnit.SECONDS);
-        DigestKey key = key(region);
+        DigestKey key = key(account, region);
         try {
             byte[] json = mapper.writeValueAsBytes(digest(account, start, end, bucket, objectKey, key, previous, files));
             String hash = Digests.sha256Hex(json);
@@ -237,19 +237,19 @@ public class CloudTrailDigestWriter {
         return files == null ? List.of() : files;
     }
 
-    /** The public keys of {@code region} valid at some point between {@code start} and {@code end}. */
-    public List<DigestKey> publicKeys(String region, Instant start, Instant end) {
-        return keys.get(region)
+    /** The account's public keys for {@code region} valid at some point between {@code start} and {@code end}. */
+    public List<DigestKey> publicKeys(String account, String region, Instant start, Instant end) {
+        return keys.getForAccount(account, region)
                 .filter(key -> (end == null || key.validityStart() <= end.toEpochMilli())
                         && (start == null || key.validityEnd() >= start.toEpochMilli()))
                 .map(List::of)
                 .orElse(List.of());
     }
 
-    private synchronized DigestKey key(String region) {
-        return keys.get(region).orElseGet(() -> {
+    private synchronized DigestKey key(String account, String region) {
+        return keys.getForAccount(account, region).orElseGet(() -> {
             DigestKey created = generateKey();
-            keys.put(region, created);
+            keys.putForAccount(account, region, created);
             return created;
         });
     }
@@ -286,7 +286,7 @@ public class CloudTrailDigestWriter {
                             long validityStart, long validityEnd) {
     }
 
-    private record ChainKey(String trailRegion, String trailName, String region) {
+    private record ChainKey(String accountId, String trailRegion, String trailName, String region) {
     }
 
     private record Chain(Instant end, String bucket, String key, String signature, String hash) {

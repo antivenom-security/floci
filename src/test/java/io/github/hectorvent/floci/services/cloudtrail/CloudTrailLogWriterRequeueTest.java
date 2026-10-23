@@ -61,7 +61,7 @@ class CloudTrailLogWriterRequeueTest {
 
         Trail trail = new Trail(trailName, "arn:aws:cloudtrail:" + region + ":000000000000:trail/" + trailName,
                 bucket, null, null, true, false, region, false, false, false, false, null, null);
-        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey(region, trailName, region);
+        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey("000000000000", region, trailName, region);
 
         ObjectMapper mapper = new ObjectMapper();
         List<ObjectNode> pending = new ArrayList<>(List.of(mapper.createObjectNode().put("eventName", "PutObject")));
@@ -70,7 +70,7 @@ class CloudTrailLogWriterRequeueTest {
         when(mockService.trailsWithPendingRecords())
                 .thenAnswer(inv -> pending.isEmpty() ? List.of() : List.of(key));
         when(mockService.pendingRecordCount(eq(key))).thenAnswer(inv -> pending.size());
-        when(mockService.getTrail(region, trailName)).thenReturn(trail);
+        when(mockService.getTrail(key)).thenReturn(trail);
         when(mockService.drainPendingRecords(eq(key), eq(CloudTrailLogWriter.MAX_RECORDS_PER_LOG_FILE)))
                 .thenAnswer(inv -> {
                     List<ObjectNode> drained = new ArrayList<>(pending);

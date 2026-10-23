@@ -37,6 +37,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
+import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.everyItem;
@@ -203,9 +204,7 @@ class CloudTrailManagementEventsIntegrationTest {
                      .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
                      .httpClient(UrlConnectionHttpClient.create()).build();
              IamClient iam = iam(AwsBasicCredentials.create("test", "test"))) {
-            String bucket = "trail-bucket-" + suffix();
-            s3.createBucket(bucket, "us-east-1");
-            s3.putBucketPolicy(bucket, cloudTrailBucketPolicy(bucket));
+            String bucket = trailBucket();
             cloudTrail.createTrail(r -> r.name(trailName).s3BucketName(bucket));
             cloudTrail.putEventSelectors(r -> r.trailName(trailName).eventSelectors(s -> s
                     .readWriteType("All").includeManagementEvents(true)
@@ -240,7 +239,7 @@ class CloudTrailManagementEventsIntegrationTest {
                     {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                       "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}""".formatted(ACCOUNT)))
                     .role().arn();
-            cloudTrail.createTrail(r -> r.name(trailName).s3BucketName("trail-bucket-" + suffix())
+            cloudTrail.createTrail(r -> r.name(trailName).s3BucketName(trailBucket())
                     .includeGlobalServiceEvents(false));
             cloudTrail.putEventSelectors(r -> r.trailName(trailName).eventSelectors(s -> s.readWriteType("WriteOnly")));
             cloudTrail.startLogging(r -> r.name(trailName));
@@ -271,9 +270,10 @@ class CloudTrailManagementEventsIntegrationTest {
                     {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                       "Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}"""))
                     .role().arn();
-            otherCloudTrail.createTrail(r -> r.name(otherTrail).s3BucketName("trail-bucket-" + suffix()));
+            String otherBucket = trailBucketOf(other);
+            otherCloudTrail.createTrail(r -> r.name(otherTrail).s3BucketName(otherBucket));
             otherCloudTrail.startLogging(r -> r.name(otherTrail));
-            cloudTrail.createTrail(r -> r.name(defaultTrail).s3BucketName("trail-bucket-" + suffix()));
+            cloudTrail.createTrail(r -> r.name(defaultTrail).s3BucketName(trailBucket()));
             cloudTrail.startLogging(r -> r.name(defaultTrail));
 
             String taskArn = "arn:aws:ecs:us-east-1:" + other + ":task/c/" + suffix();
@@ -282,7 +282,7 @@ class CloudTrailManagementEventsIntegrationTest {
             otherCloudTrail.stopLogging(r -> r.name(otherTrail));
             cloudTrail.stopLogging(r -> r.name(defaultTrail));
 
-            assertTrue(drain(otherTrail).stream().anyMatch(record -> record.toString().contains(roleArn)));
+            assertTrue(drain(other, otherTrail).stream().anyMatch(record -> record.toString().contains(roleArn)));
             assertFalse(drain(defaultTrail).stream().anyMatch(record -> record.toString().contains(roleArn)));
             otherCloudTrail.deleteTrail(r -> r.name(otherTrail));
             cloudTrail.deleteTrail(r -> r.name(defaultTrail));
@@ -293,7 +293,7 @@ class CloudTrailManagementEventsIntegrationTest {
     void emptyEventSelectorsAreRejected() {
         String trailName = "empty-" + suffix();
         try (CloudTrailClient cloudTrail = cloudTrail(AwsBasicCredentials.create("test", "test"), true)) {
-            cloudTrail.createTrail(r -> r.name(trailName).s3BucketName("trail-bucket-" + suffix()));
+            cloudTrail.createTrail(r -> r.name(trailName).s3BucketName(trailBucket()));
             CloudTrailException thrown = assertThrows(CloudTrailException.class,
                     () -> cloudTrail.putEventSelectors(r -> r.trailName(trailName).eventSelectors(List.of())));
             assertEquals("InvalidEventSelectorsException", thrown.awsErrorDetails().errorCode());
@@ -302,7 +302,11 @@ class CloudTrailManagementEventsIntegrationTest {
     }
 
     private List<ObjectNode> drain(String trailName) {
-        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey("us-east-1", trailName, "us-east-1");
+        return drain(ACCOUNT, trailName);
+    }
+
+    private List<ObjectNode> drain(String account, String trailName) {
+        CloudTrailService.TrailKey key = new CloudTrailService.TrailKey(account, "us-east-1", trailName, "us-east-1");
         List<ObjectNode> records = trails.drainPendingRecords(key);
         trails.completeDelivery(key);
         return records;
@@ -433,6 +437,23 @@ class CloudTrailManagementEventsIntegrationTest {
 
     private static String suffix() {
         return UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private String trailBucket() {
+        String bucket = "trail-bucket-" + suffix();
+        s3.createBucket(bucket, "us-east-1");
+        s3.putBucketPolicy(bucket, cloudTrailBucketPolicy(bucket));
+        return bucket;
+    }
+
+    private static String trailBucketOf(String account) {
+        String bucket = "trail-bucket-" + suffix();
+        String auth = "AWS4-HMAC-SHA256 Credential=" + account + "/20261023/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        given().header("Authorization", auth).when().put("/" + bucket).then().statusCode(200);
+        given().header("Authorization", auth).body(cloudTrailBucketPolicy(bucket))
+                .when().put("/" + bucket + "?policy").then().statusCode(200);
+        return bucket;
     }
 
     private static String cloudTrailBucketPolicy(String bucket) {

@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
@@ -68,7 +67,6 @@ public class CloudTrailLogWriter {
     private final EmulatorConfig config;
     private final CloudTrailService cloudTrailService;
     private final S3Service s3Service;
-    private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final CloudTrailDigestWriter digestWriter;
     private final CloudTrailCwlDelivery cwlDelivery;
@@ -84,7 +82,6 @@ public class CloudTrailLogWriter {
     public CloudTrailLogWriter(EmulatorConfig config,
                                CloudTrailService cloudTrailService,
                                S3Service s3Service,
-                               RegionResolver regionResolver,
                                ObjectMapper mapper,
                                CloudTrailDigestWriter digestWriter,
                                CloudTrailCwlDelivery cwlDelivery,
@@ -93,7 +90,6 @@ public class CloudTrailLogWriter {
         this.config = config;
         this.cloudTrailService = cloudTrailService;
         this.s3Service = s3Service;
-        this.regionResolver = regionResolver;
         this.mapper = mapper;
         this.digestWriter = digestWriter;
         this.cwlDelivery = cwlDelivery;
@@ -191,7 +187,7 @@ public class CloudTrailLogWriter {
     }
 
     private int flushTrail(CloudTrailService.TrailKey key) {
-        Trail trail = cloudTrailService.getTrail(key.region(), key.trailName());
+        Trail trail = cloudTrailService.getTrail(key);
         if (trail == null) {
             // Trail was deleted while records were pending: drop them.
             cloudTrailService.discardPendingRecords(key);
@@ -206,7 +202,7 @@ public class CloudTrailLogWriter {
         byte[] json;
         byte[] payload;
         String objectKey;
-        String accountId = regionResolver.getAccountId();
+        String accountId = key.accountId();
         try {
             json = serialize(records);
             payload = gzip(json);
@@ -260,6 +256,7 @@ public class CloudTrailLogWriter {
                     .bucketName(trail.s3BucketName())
                     .key(objectKey)
                     .invokedBy(ServicePrincipals.of("cloudtrail"))
+                    .accountId(accountId)
                     .bytesIn(payload.length)
                     .bytesOut(0)
                     .errorCode(null)
@@ -278,11 +275,12 @@ public class CloudTrailLogWriter {
         try {
             cwlDelivery.deliver(trail, accountId, key.eventRegion(), records);
             long now = System.currentTimeMillis();
-            cloudTrailService.updateChannels(key.region(), key.trailName(), c -> c.cloudWatchLogs(now, null));
+            cloudTrailService.updateChannels(key.accountId(), key.region(), key.trailName(),
+                    c -> c.cloudWatchLogs(now, null));
         } catch (RuntimeException e) {
             LOG.warnv(e, "CloudTrail delivery to CloudWatch Logs failed for trail {0}", key.trailName());
             String error = deliveryError(e);
-            cloudTrailService.updateChannels(key.region(), key.trailName(),
+            cloudTrailService.updateChannels(key.accountId(), key.region(), key.trailName(),
                     c -> c.cloudWatchLogs(c.cloudWatchLogsDeliveryTime(), error));
         }
     }
@@ -299,11 +297,12 @@ public class CloudTrailLogWriter {
             snsService.publish(trail.snsTopicArn(), null, mapper.writeValueAsString(message), null,
                     AwsArnUtils.regionOrDefault(trail.snsTopicArn(), trail.homeRegion()));
             long now = System.currentTimeMillis();
-            cloudTrailService.updateChannels(key.region(), key.trailName(), c -> c.notification(now, null));
+            cloudTrailService.updateChannels(key.accountId(), key.region(), key.trailName(),
+                    c -> c.notification(now, null));
         } catch (JsonProcessingException | RuntimeException e) {
             LOG.warnv(e, "CloudTrail SNS notification failed for trail {0}", key.trailName());
             String error = e instanceof RuntimeException runtime ? deliveryError(runtime) : e.getMessage();
-            cloudTrailService.updateChannels(key.region(), key.trailName(),
+            cloudTrailService.updateChannels(key.accountId(), key.region(), key.trailName(),
                     c -> c.notification(c.notificationTime(), error));
         }
     }

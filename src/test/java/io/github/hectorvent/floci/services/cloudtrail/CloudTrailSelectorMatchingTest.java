@@ -207,7 +207,7 @@ class CloudTrailSelectorMatchingTest {
         }
 
         List<ObjectNode> records = service.drainPendingRecords(
-                new CloudTrailService.TrailKey(REGION, "reads", REGION));
+                new CloudTrailService.TrailKey("000000000000", REGION, "reads", REGION));
         assertEquals(List.of("SelectObjectContent", "GetObjectAttributes"),
                 records.stream().map(record -> record.path("eventName").asText()).toList());
         for (ObjectNode record : records) {

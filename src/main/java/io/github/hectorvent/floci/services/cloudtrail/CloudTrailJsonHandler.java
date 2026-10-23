@@ -266,7 +266,7 @@ public class CloudTrailJsonHandler {
     private Response listPublicKeys(JsonNode req, String region) {
         ObjectNode resp = mapper.createObjectNode();
         ArrayNode keys = resp.putArray("PublicKeyList");
-        for (CloudTrailDigestWriter.DigestKey key : digestWriter.publicKeys(region,
+        for (CloudTrailDigestWriter.DigestKey key : digestWriter.publicKeys(regionResolver.getAccountId(), region,
                 timestamp(req.get("StartTime")), timestamp(req.get("EndTime")))) {
             keys.addObject()
                     .put("Value", key.publicKey())
