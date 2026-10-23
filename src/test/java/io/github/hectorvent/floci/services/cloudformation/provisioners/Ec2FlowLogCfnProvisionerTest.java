@@ -16,9 +16,11 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -55,15 +57,16 @@ class Ec2FlowLogCfnProvisionerTest {
         fl.setFlowLogId(id);
         fl.setResourceType("VPC");
         fl.setTrafficType("ALL");
-        fl.setLogDestinationType("s3");
+        fl.setLogDestinationType("cloud-watch-logs");
         return fl;
     }
 
     @Test
     void flowLogSetsPhysicalIdAndIdAttribute() {
         when(flowLogs.createFlowLog(eq("us-east-1"), eq("vpc-123"), eq("VPC"), eq("ALL"),
-                eq("cloud-watch-logs"), eq("arn:aws:logs:us-east-1:000000000000:log-group:flows"),
-                eq("arn:aws:iam::000000000000:role/flow-logs-role"), eq("${srcaddr}"), eq(60)))
+                eq("cloud-watch-logs"), eq("arn:aws:logs:us-east-1:000000000000:log-group:flows"), isNull(),
+                eq("arn:aws:iam::000000000000:role/flow-logs-role"), eq("${srcaddr}"), eq(60), isNull(),
+                eq(false), eq(false)))
                 .thenReturn(flowLog("fl-0abc"));
         StackResource r = resource();
         ObjectNode props = mapper.createObjectNode()
@@ -84,12 +87,14 @@ class Ec2FlowLogCfnProvisionerTest {
 
     @Test
     void omittedAggregationIntervalDefaultsToTenMinutes() {
-        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any(),
+                anyBoolean(), anyBoolean()))
                 .thenReturn(flowLog("fl-0def"));
 
         provisioner.provision(resource(), mapper.createObjectNode().put("ResourceId", "vpc-9"), ctx());
 
-        verify(flowLogs).createFlowLog("us-east-1", "vpc-9", null, null, null, null, null, null, 600);
+        verify(flowLogs).createFlowLog("us-east-1", "vpc-9", null, null, null, null, null, null, null, 600, null,
+                false, false);
     }
 
     @Test
@@ -106,7 +111,8 @@ class Ec2FlowLogCfnProvisionerTest {
         provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());
 
         // A second flow log here outlives the stack: delete only knows the id recorded last.
-        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any(),
+                anyBoolean(), anyBoolean());
         assertEquals("fl-0abc", r.getPhysicalId());
         assertEquals("fl-0abc", r.getAttributes().get("Id"));
     }
@@ -125,7 +131,8 @@ class Ec2FlowLogCfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
                 mapper.createObjectNode().put("ResourceId", "vpc-123").put("TrafficType", "REJECT"), ctx()));
         assertEquals("ValidationError", e.getErrorCode());
-        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any(),
+                anyBoolean(), anyBoolean());
     }
 
     @Test
@@ -141,7 +148,8 @@ class Ec2FlowLogCfnProvisionerTest {
                 mapper.createObjectNode().put("ResourceId", "vpc-123")
                         .put("DeliverLogsPermissionArn", "arn:aws:iam::000000000000:role/new-role"), ctx()));
         assertEquals("ValidationError", e.getErrorCode());
-        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any(),
+                anyBoolean(), anyBoolean());
     }
 
     @Test
@@ -159,12 +167,13 @@ class Ec2FlowLogCfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
                 mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx()));
         assertEquals("ValidationError", e.getErrorCode());
-        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any(),
+                anyBoolean(), anyBoolean());
     }
 
     @Test
     void reapplyingATemplateThatOmitsDefaultedPropertiesIsANoOp() {
-        // createFlowLog stores VPC, ALL and s3 when the template omits them, so a re-apply reads
+        // createFlowLog stores ALL and cloud-watch-logs when the template omits them, so a re-apply reads
         // null against those defaults. Comparing raw values made an unchanged stack update fail.
         StackResource r = resource();
         r.setPhysicalId("fl-0abc");
@@ -172,13 +181,14 @@ class Ec2FlowLogCfnProvisionerTest {
         existing.setResourceId("vpc-123");
         existing.setResourceType("VPC");
         existing.setTrafficType("ALL");
-        existing.setLogDestinationType("s3");
+        existing.setLogDestinationType("cloud-watch-logs");
         when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
 
         provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());
 
         assertEquals("fl-0abc", r.getPhysicalId());
-        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any(),
+                anyBoolean(), anyBoolean());
     }
 
     @Test
@@ -201,7 +211,8 @@ class Ec2FlowLogCfnProvisionerTest {
         StackResource r = resource();
         r.setPhysicalId("fl-gone");
         when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-gone"))).thenReturn(List.of());
-        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyInt(), any(),
+                anyBoolean(), anyBoolean()))
                 .thenReturn(flowLog("fl-new"));
 
         provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), ctx());

@@ -1233,6 +1233,33 @@ public interface EmulatorConfig {
          *  default here is 60s so dev/CI feedback loops stay fast. */
         @WithDefault("60")
         int flushIntervalSeconds();
+
+        CloudTrailManagementEventsConfig managementEvents();
+
+        CloudTrailEventHistoryConfig eventHistory();
+
+        /** LookupEvents calls allowed per second per account and region, AWS's 2 TPS. */
+        @WithDefault("2")
+        int lookupRateLimitPerSecond();
+
+        /** Record the first X-Forwarded-For address as sourceIPAddress instead of the TCP peer. */
+        @WithDefault("false")
+        boolean trustForwardedFor();
+    }
+
+    interface CloudTrailManagementEventsConfig {
+        /** Record management events into event history and route them to trails. */
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CloudTrailEventHistoryConfig {
+        @WithDefault("90")
+        int retentionDays();
+
+        /** Oldest events are evicted past this many, across all accounts and regions. */
+        @WithDefault("200000")
+        int maxEvents();
     }
 
     interface ResourceExplorer2ServiceConfig {
@@ -3337,6 +3364,28 @@ public interface EmulatorConfig {
 
         /** Docker-network backing for VPCs and subnets. */
         VpcNetworksConfig vpcNetworks();
+
+        /** VPC Flow Logs delivery. */
+        FlowLogsConfig flowLogs();
+    }
+
+    interface FlowLogsConfig {
+        /**
+         * {@code observed} records real traffic at security-group enforcement points,
+         * {@code synthetic} generates random records, {@code off} delivers nothing. Unset means
+         * observed when security-group enforcement is enabled and synthetic otherwise.
+         *
+         * Env var: FLOCI_SERVICES_EC2_FLOW_LOGS_MODE
+         */
+        Optional<String> mode();
+
+        /** Seconds between conntrack and reject-counter polls of each managed ENI. */
+        @WithDefault("10")
+        int captureTickSeconds();
+
+        /** Seconds between flow-log files written to an S3 destination. */
+        @WithDefault("300")
+        int s3PublishIntervalSeconds();
     }
 
     /**
