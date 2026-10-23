@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
@@ -16,6 +17,7 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -113,7 +115,7 @@ public class CloudTrailLogWriter {
         LOG.infov("CloudTrail log writer started (flushIntervalSeconds={0})", interval);
     }
 
-    void stop(@Observes ShutdownEvent event) {
+    void stop(@Observes @Priority(1000) ShutdownEvent event) {
         if (executor != null) {
             // Best-effort final flush so shutdown doesn't lose buffered events.
             try { flushAll(); } catch (Exception e) { LOG.warnv(e, "CloudTrail final flush on shutdown failed: some records may be lost"); }
@@ -130,7 +132,7 @@ public class CloudTrailLogWriter {
         flushAll();
     }
 
-    private void requestEarlyFlush() {
+    void requestEarlyFlush() {
         ScheduledExecutorService current = executor;
         if (current != null && earlyFlushQueued.compareAndSet(false, true)) {
             current.execute(this::flushAll);
@@ -163,7 +165,7 @@ public class CloudTrailLogWriter {
         try {
             int remaining = cloudTrailService.pendingRecordCount(key);
             while (remaining > 0) {
-                int flushed = flushTrail(key);
+                int flushed = RequestScopes.callAs(key.accountId(), () -> flushTrail(key));
                 if (flushed == 0) {
                     return;
                 }

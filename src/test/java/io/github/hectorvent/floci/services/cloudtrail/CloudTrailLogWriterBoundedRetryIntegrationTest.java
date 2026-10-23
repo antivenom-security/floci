@@ -253,6 +253,38 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
     }
 
     @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void burstQueuedBeforeAFailedDeliveryIsDeliveredWithoutLossOnceTheBucketReturns() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "failed-burst-source-" + suffix;
+        String destinationBucket = "failed-burst-logs-" + suffix;
+        String trailName = "failed-burst-trail-" + suffix;
+        int events = 5000;
+
+        createBucket(sourceBucket);
+        createTrail(trailName, destinationBucket);
+        selectSourceBucket(trailName, sourceBucket);
+        startLogging(trailName);
+        cloudTrailService.onBufferFull(() -> { });
+        try {
+            emitEvents(sourceBucket, "us-east-1", events, "burst");
+            writer.flushNow();
+            assertTrue(getTrailStatus(trailName).hasNonNull("LatestDeliveryError"));
+        } finally {
+            cloudTrailService.onBufferFull(writer::requestEarlyFlush);
+        }
+
+        createBucket(destinationBucket);
+        writer.flushNow();
+
+        Set<String> deliveredKeys = new HashSet<>();
+        for (JsonNode record : deliveredRecords(destinationBucket)) {
+            deliveredKeys.add(record.path("requestParameters").path("key").asText());
+        }
+        assertEquals(events, deliveredKeys.size());
+    }
+
+    @Test
     @Timeout(value = 2, unit = TimeUnit.MINUTES)
     void fullBufferIsDeliveredBeforeTheInterval() throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);

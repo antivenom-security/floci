@@ -18,9 +18,10 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
   by default), one file per event region, dated by when they are published,
   holding at most 1,000 records and 50 MB uncompressed.
 - Nothing is dropped while the destination accepts writes: a trail whose
-  buffer reaches 1,024 records or 4 MB is delivered early. While delivery
-  fails, the buffer keeps the oldest records up to that size and refuses the
-  rest, and `GetTrailStatus` reports the failure in `LatestDeliveryError`.
+  buffer reaches 1,024 records or 4 MB is delivered early. A failed delivery
+  keeps every queued record for the next attempt; while delivery fails, a
+  full buffer refuses new records, and `GetTrailStatus` reports the failure in
+  `LatestDeliveryError`.
 - A trail with `CloudWatchLogsLogGroupArn` and `CloudWatchLogsRoleArn` sends
   each delivered record as one log event to the stream
   `${accountId}_CloudTrail_${region}`, skipping records over 256 KB.
@@ -30,8 +31,9 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
   after each delivered file, reported in `LatestNotificationTime` and
   `LatestNotificationError`.
 - A trail with log file validation writes a digest file every
-  `digest-interval-seconds` (hourly by default) for its home region and every
-  region it delivered logs for, even when no log file was delivered:
+  `digest-interval-seconds` (hourly by default) for every region it covers
+  (each region of its partition for a multi-region trail), even when no log
+  file was delivered:
 
   ```
   ${prefix}AWSLogs/${accountId}/CloudTrail-Digest/${region}/yyyy/MM/dd/${accountId}_CloudTrail-Digest_${region}_${trail}_${homeRegion}_${YYYYMMDDTHHmmssZ}.json.gz
@@ -41,7 +43,9 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
   per-region RSA-2048 key, the signature in the object's `signature` metadata.
   `ListPublicKeys` returns the key, so `aws cloudtrail validate-logs` verifies
   the files. `LatestDigestDeliveryTime` and `LatestDigestDeliveryError` report
-  the outcome. The digest chain is kept in memory and restarts with Floci.
+  the outcome. The digest chain is kept in memory and starts again when Floci
+  restarts or the trail starts logging again; a key is replaced once its
+  365-day validity ends.
 
 With `floci.services.iam.enforcement-enabled`, `CreateTrail` and `UpdateTrail`
 check that the bucket policy lets `cloudtrail.amazonaws.com` perform

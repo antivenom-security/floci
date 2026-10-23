@@ -161,7 +161,7 @@ public class CloudTrailService {
         withTrailLock(key, () -> store.delete(key));
         String accountId = regionResolver.getAccountId();
         pendingRecordsByTrail.keySet().removeIf(k -> k.accountId().equals(accountId)
-                && k.trailName().equals(trail.name()));
+                && k.region().equals(trail.homeRegion()) && k.trailName().equals(trail.name()));
     }
 
     public Trail updateTrail(String region, String trailNameOrArn,
@@ -691,7 +691,6 @@ public class CloudTrailService {
                     byteCount += pending.byteCount();
                 }
             }
-            trimTailToLimit(eventRegion);
         }
 
         synchronized List<ObjectNode> drain(String eventRegion) {
@@ -768,22 +767,6 @@ public class CloudTrailService {
                         return (records != null && !records.isEmpty()) || inFlightByRegion.containsKey(eventRegion);
                     })
                     .toList();
-        }
-
-        private void trimTailToLimit(String preferredRegion) {
-            while (recordCount > MAX_PENDING_RECORDS_PER_TRAIL
-                    || byteCount > MAX_PENDING_BYTES_PER_TRAIL) {
-                ArrayDeque<PendingRecord> records = recordsByRegion.get(preferredRegion);
-                if (records == null || records.isEmpty()) {
-                    records = recordsByRegion.values().stream()
-                            .filter(queue -> !queue.isEmpty())
-                            .findFirst()
-                            .orElseThrow();
-                }
-                PendingRecord dropped = records.removeLast();
-                recordCount--;
-                byteCount -= dropped.byteCount();
-            }
         }
     }
 
