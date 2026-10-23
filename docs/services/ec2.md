@@ -992,6 +992,16 @@ Validation matches AWS behavior:
 | DescribeFlowLogs | Lists stored flow logs, optionally filtered by id. |
 | DeleteFlowLogs | Deletes the named flow logs. |
 
+Flow logs deliver in one of three modes, set by `FLOCI_SERVICES_EC2_FLOW_LOGS_MODE`:
+
+- `observed` (the default when security-group enforcement is enabled) records real traffic. It covers only ENIs Floci runs behind security-group enforcement: Docker-backed EC2 instances and ECS `awsvpc` tasks. Plain containers, RDS, Lambda and other ENIs produce no records.
+- `synthetic` (the default otherwise) generates random records from the EC2 inventory and writes them to S3 every 60 seconds.
+- `off` delivers nothing.
+
+In `observed` mode, accepted traffic comes from conntrack accounting in each ENI's protected namespace and rejected traffic from counters the security-group policy updates before it drops a packet, polled every `FLOCI_SERVICES_EC2_FLOW_LOGS_CAPTURE_TICK_SECONDS`. Each aggregation window (`MaxAggregationInterval`, 60 or 600 seconds) yields one record per ENI, 5-tuple, direction and action, with `start` and `end` set to the first and last poll that saw the flow, and one `NODATA` record for a covered ENI that carried nothing. A connection between two managed ENIs therefore appears four times. Addresses are the ENIs' private addresses. Traffic to Floci's DNS on port 53, DHCP, `169.254.169.254`, `169.254.169.123` and the Docker gateway is not recorded. `LogFormat` accepts the version 2 to 5, 7 and 8 fields; `version` is the highest version among the selected fields. ECS task ENIs fill the `ecs-*` fields Fargate-style: no container instance, and container ids of the form `<task-id>-<n>`. `tcp-flags` is derived from the connection state, and `traffic-path` is `1` to another managed ENI in the VPC, `2` to Floci's own address, `-` otherwise.
+
+Destinations are `s3` (gzip files under `[prefix/]AWSLogs/<account>/vpcflowlogs/<region>/YYYY/MM/DD/[HH/]`, or the Hive form with `DestinationOptions.HiveCompatiblePartitions`, written every `FLOCI_SERVICES_EC2_FLOW_LOGS_S3_PUBLISH_INTERVAL_SECONDS`) and `cloud-watch-logs` (one stream per ENI named `<eni-id>-all`, `-accept` or `-reject` by `TrafficType`, each record an event stamped with its `start`). `cloud-watch-logs` requires `DeliverLogsPermissionArn` and creates the log group when it is missing. `kinesis-data-firehose` and the `parquet` file format return `UnsupportedOperation`.
+
 ### Spot Instances
 
 | Action | Description |

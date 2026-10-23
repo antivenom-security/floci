@@ -1303,6 +1303,9 @@ public class ContainerLifecycleManager {
         if (linux.memorySwappiness() != null) {
             hostConfig.withMemorySwappiness(linux.memorySwappiness());
         }
+        if (!linux.sysctls().isEmpty()) {
+            hostConfig.withSysctls(linux.sysctls());
+        }
 
         // CPU quota and weight
         if (spec.nanoCpus() != null && spec.nanoCpus() > 0) {

@@ -8,12 +8,9 @@ import java.time.Instant;
 /**
  * Represents a VPC Flow Log configuration created via {@code CreateFlowLogs}.
  *
- * <p>The emulator delivers synthetic VPC flow-log records to an S3 bucket in the
- * exact record format and S3 key layout that AWS uses
- * ({@code AWSLogs/{account}/vpcflowlogs/{region}/...}, gzipped, space-delimited
- * default fields). This lets any tool that consumes VPC flow logs — log
- * pipelines, SIEMs, traffic-analysis software — be exercised locally against
- * realistic data with no real cloud spend.</p>
+ * <p>Records are delivered to S3 or CloudWatch Logs in the record format and layout AWS uses,
+ * either observed from managed ENIs or synthesized, as {@code floci.services.ec2.flow-logs.mode}
+ * selects.</p>
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -28,6 +25,10 @@ public class FlowLog {
     private String deliverLogsPermissionArn; // IAM role ARN used for cloud-watch-logs delivery
     private String bucketName;       // resolved bucket name from the ARN
     private String logFormat;        // optional custom format string (default format used if null)
+    private String logGroupName;     // cloud-watch-logs destination group
+    private String fileFormat = "plain-text";
+    private boolean hiveCompatiblePartitions;
+    private boolean perHourPartition;
     private int maxAggregationInterval = 600; // seconds (60 or 600)
     private String region;
     private String accountId;
@@ -63,6 +64,20 @@ public class FlowLog {
 
     public String getLogFormat() { return logFormat; }
     public void setLogFormat(String logFormat) { this.logFormat = logFormat; }
+
+    public String getLogGroupName() { return logGroupName; }
+    public void setLogGroupName(String logGroupName) { this.logGroupName = logGroupName; }
+
+    public String getFileFormat() { return fileFormat; }
+    public void setFileFormat(String fileFormat) { this.fileFormat = fileFormat; }
+
+    public boolean isHiveCompatiblePartitions() { return hiveCompatiblePartitions; }
+    public void setHiveCompatiblePartitions(boolean hiveCompatiblePartitions) {
+        this.hiveCompatiblePartitions = hiveCompatiblePartitions;
+    }
+
+    public boolean isPerHourPartition() { return perHourPartition; }
+    public void setPerHourPartition(boolean perHourPartition) { this.perHourPartition = perHourPartition; }
 
     public int getMaxAggregationInterval() { return maxAggregationInterval; }
     public void setMaxAggregationInterval(int maxAggregationInterval) { this.maxAggregationInterval = maxAggregationInterval; }

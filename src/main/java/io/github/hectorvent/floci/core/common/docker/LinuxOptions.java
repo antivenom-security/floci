@@ -8,7 +8,7 @@ import java.util.Map;
 /**
  * The Linux process options a container is created with, as {@code docker run} names them:
  * {@code --cap-add}, {@code --cap-drop}, {@code --device}, {@code --shm-size}, {@code --tmpfs},
- * {@code --memory-swap} and {@code --memory-swappiness}; {@code --init} is
+ * {@code --memory-swap}, {@code --memory-swappiness} and {@code --sysctl}; {@code --init} is
  * {@link ContainerSpec#init()}. {@link #NONE} leaves every one of them to the daemon.
  *
  * @param capAdd capabilities added to the daemon's default set, named without {@code CAP_}
@@ -20,6 +20,7 @@ import java.util.Map;
  * @param memorySwapBytes memory plus swap the container may use, in bytes; equal to the memory
  *        limit means no swap (null = daemon default)
  * @param memorySwappiness swappiness from 0 to 100 (null = daemon default)
+ * @param sysctls namespaced kernel parameters set at creation
  */
 public record LinuxOptions(
         List<String> capAdd,
@@ -28,8 +29,9 @@ public record LinuxOptions(
         Long shmSizeBytes,
         Map<String, String> tmpfs,
         Long memorySwapBytes,
-        Long memorySwappiness
+        Long memorySwappiness,
+        Map<String, String> sysctls
 ) {
     public static final LinuxOptions NONE =
-            new LinuxOptions(List.of(), List.of(), List.of(), null, Map.of(), null, null);
+            new LinuxOptions(List.of(), List.of(), List.of(), null, Map.of(), null, null, Map.of());
 }
