@@ -16,9 +16,11 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
@@ -38,6 +40,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -59,9 +62,12 @@ public class QueryLogWriter implements DnsQueryObserver {
             .withZone(ZoneOffset.UTC);
     private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("yyyy/MM/dd").withZone(ZoneOffset.UTC);
 
-    record S3Target(String bucket, String prefix, String accountId, String vpcId) {}
+    static final int MAX_PENDING_PER_TARGET = 10_000;
 
-    record LogsTarget(String accountId, String region, String logGroup, String vpcId, String sourceId) {}
+    record S3Target(String bucket, String prefix, String accountId, String vpcId, Instant slot) {}
+
+    record LogsTarget(String accountId, String region, String logGroup, String vpcId, String sourceId,
+                      String minute) {}
 
     private final EmulatorConfig config;
     private final Route53ResolverService resolverService;
@@ -72,6 +78,7 @@ public class QueryLogWriter implements DnsQueryObserver {
     private final ObjectMapper mapper;
     private Map<S3Target, List<String>> s3Pending = new HashMap<>();
     private Map<LogsTarget, List<Map<String, Object>>> logsPending = new HashMap<>();
+    private final AtomicLong droppedRecords = new AtomicLong();
     private ScheduledExecutorService executor;
 
     @Inject
@@ -104,7 +111,7 @@ public class QueryLogWriter implements DnsQueryObserver {
         executor.scheduleAtFixedRate(this::flushLogs, logsInterval, logsInterval, TimeUnit.SECONDS);
     }
 
-    void stop(@Observes ShutdownEvent event) {
+    void stop(@Observes @Priority(Interceptor.Priority.APPLICATION) ShutdownEvent event) {
         if (executor != null) {
             flushNow();
             executor.shutdownNow();
@@ -134,23 +141,50 @@ public class QueryLogWriter implements DnsQueryObserver {
         }
         String instanceId = instanceOf(eni);
         String line = record(query, eni, instanceId).toString();
+        Instant slot = Instant.ofEpochSecond(query.timestamp().getEpochSecond() / 300 * 300);
+        String minute = SLOT.format(query.timestamp());
+        boolean flushS3Early = false;
+        boolean flushLogsEarly = false;
         synchronized (this) {
             for (String destination : destinations) {
                 Optional<String> bucketPath = AwsArnUtils.resourceIfArnFor(destination, "s3");
                 if (bucketPath.isPresent()) {
                     String[] parts = bucketPath.orElseThrow().split("/", 2);
-                    s3Pending.computeIfAbsent(new S3Target(parts[0], parts.length > 1 ? parts[1] : "",
-                            eni.accountId(), eni.vpcId()), k -> new ArrayList<>()).add(line);
+                    flushS3Early |= enqueue(s3Pending, new S3Target(parts[0], parts.length > 1 ? parts[1] : "",
+                            eni.accountId(), eni.vpcId(), slot), List.of(line));
                     continue;
                 }
                 AwsArnUtils.Arn group = AwsArnUtils.parse(destination);
                 String groupName = group.resource().replaceFirst("^log-group:", "").replaceFirst(":\\*$", "");
-                logsPending.computeIfAbsent(new LogsTarget(group.accountId(), group.region(), groupName,
-                                eni.vpcId(), instanceId != null ? instanceId : eni.eniId()),
-                        k -> new ArrayList<>())
-                        .add(Map.of("timestamp", query.timestamp().toEpochMilli(), "message", line));
+                flushLogsEarly |= enqueue(logsPending, new LogsTarget(group.accountId(), group.region(), groupName,
+                                eni.vpcId(), instanceId != null ? instanceId : eni.eniId(), minute),
+                        List.of(Map.of("timestamp", query.timestamp().toEpochMilli(), "message", line)));
             }
         }
+        ScheduledExecutorService scheduler = executor;
+        if (scheduler != null && flushS3Early) {
+            scheduler.execute(this::flushS3);
+        }
+        if (scheduler != null && flushLogsEarly) {
+            scheduler.execute(this::flushLogs);
+        }
+    }
+
+    /** Adds up to the per-target cap, counting the rest as dropped; true when this call filled the target. */
+    private <K, V> boolean enqueue(Map<K, List<V>> pending, K key, List<V> values) {
+        List<V> list = pending.computeIfAbsent(key, k -> new ArrayList<>());
+        int before = list.size();
+        int accepted = Math.max(0, Math.min(values.size(), MAX_PENDING_PER_TARGET - before));
+        list.addAll(values.subList(0, accepted));
+        if (accepted < values.size()) {
+            long dropped = droppedRecords.addAndGet(values.size() - accepted);
+            LOG.warnv("Query-log buffer for {0} is full; {1} records dropped so far", key, dropped);
+        }
+        return before < MAX_PENDING_PER_TARGET && list.size() >= MAX_PENDING_PER_TARGET;
+    }
+
+    long droppedRecords() {
+        return droppedRecords.get();
     }
 
     /** R53-EX key order; {@code srcids} names the instance for EC2 and is empty for a task ENI. */
@@ -200,16 +234,18 @@ public class QueryLogWriter implements DnsQueryObserver {
             batch = s3Pending;
             s3Pending = new HashMap<>();
         }
-        Instant slot = Instant.ofEpochSecond(Instant.now().getEpochSecond() / 300 * 300);
         for (Map.Entry<S3Target, List<String>> entry : batch.entrySet()) {
             S3Target target = entry.getKey();
-            String key = s3Key(target, slot);
+            String key = s3Key(target, target.slot());
             try {
                 s3Service.putObject(target.bucket(), key, gzip(String.join("\n", entry.getValue()) + "\n"),
                         "application/octet-stream", Map.of());
             } catch (RuntimeException e) {
-                LOG.warnv("Dropped {0} query-log records for s3://{1}/{2}: {3}",
-                        entry.getValue().size(), target.bucket(), key, e.getMessage());
+                LOG.warnv("Query-log delivery to s3://{0}/{1} failed, keeping {2} records for the next flush: {3}",
+                        target.bucket(), key, entry.getValue().size(), e.getMessage());
+                synchronized (this) {
+                    enqueue(s3Pending, target, entry.getValue());
+                }
             }
         }
     }
@@ -229,10 +265,9 @@ public class QueryLogWriter implements DnsQueryObserver {
             batch = logsPending;
             logsPending = new HashMap<>();
         }
-        String slot = SLOT.format(Instant.now());
         for (Map.Entry<LogsTarget, List<Map<String, Object>>> entry : batch.entrySet()) {
             LogsTarget target = entry.getKey();
-            String stream = target.vpcId() + "_" + slot + "_" + target.sourceId();
+            String stream = target.vpcId() + "_" + target.minute() + "_" + target.sourceId();
             try {
                 try {
                     logsService.createLogStreamForAccount(target.accountId(), target.logGroup(), stream,
@@ -245,8 +280,11 @@ public class QueryLogWriter implements DnsQueryObserver {
                 logsService.putLogEventsForAccount(target.accountId(), target.logGroup(), stream,
                         entry.getValue(), target.region());
             } catch (RuntimeException e) {
-                LOG.warnv("Dropped {0} query-log records for log group {1}: {2}",
-                        entry.getValue().size(), target.logGroup(), e.getMessage());
+                LOG.warnv("Query-log delivery to log group {0} failed, keeping {1} records for the next flush: {2}",
+                        target.logGroup(), entry.getValue().size(), e.getMessage());
+                synchronized (this) {
+                    enqueue(logsPending, target, entry.getValue());
+                }
             }
         }
     }
