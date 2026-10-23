@@ -54,6 +54,7 @@ public class CloudTrailService {
     private final ObjectMapper mapper;
     private final CloudTrailRecordBuilder recordBuilder;
     private final UserIdentityBuilder userIdentityBuilder;
+    private final CloudTrailEventBridgeForwarder eventBridge;
 
     /** Per-trail pending record buffers: ephemeral, never persisted. */
     private final ConcurrentHashMap<PendingTrailKey, PendingRecordBuffer> pendingRecordsByTrail =
@@ -69,20 +70,22 @@ public class CloudTrailService {
     private final ConcurrentHashMap<String, Object> trailLocks = new ConcurrentHashMap<>();
 
     CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
-                      IamService iamService, ObjectMapper mapper) {
+                      IamService iamService, ObjectMapper mapper, CloudTrailEventBridgeForwarder eventBridge) {
         this(storageFactory, regionResolver, mapper, new CloudTrailRecordBuilder(mapper),
-                new UserIdentityBuilder(iamService, regionResolver, mapper));
+                new UserIdentityBuilder(iamService, regionResolver, mapper), eventBridge);
     }
 
     @Inject
     public CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver, ObjectMapper mapper,
-                             CloudTrailRecordBuilder recordBuilder, UserIdentityBuilder userIdentityBuilder) {
+                             CloudTrailRecordBuilder recordBuilder, UserIdentityBuilder userIdentityBuilder,
+                             CloudTrailEventBridgeForwarder eventBridge) {
         this.store = storageFactory.create("cloudtrail", "cloudtrail-trails.json",
                 new TypeReference<Map<String, CloudTrailEntry>>() {});
         this.regionResolver = regionResolver;
         this.mapper = mapper;
         this.recordBuilder = recordBuilder;
         this.userIdentityBuilder = userIdentityBuilder;
+        this.eventBridge = eventBridge;
     }
 
     // --- Control plane ---
@@ -368,6 +371,7 @@ public class CloudTrailService {
                 return;
             }
             ObjectNode record = buildS3Record(in, region);
+            eventBridge.forward(record);
             for (MatchedTrail mt : matched) {
                 ObjectNode copy = record.deepCopy();
                 boolean accepted = append(new TrailKey(mt.region(), mt.trail().name(), region), copy);
@@ -385,11 +389,15 @@ public class CloudTrailService {
         }
     }
 
-    /** Appends a management event record to every logging trail whose region and selectors cover it. */
-    public void routeManagementEvent(ObjectNode record) {
+    /**
+     * Appends a management event record to every logging trail whose region and selectors cover it,
+     * returning whether any trail did.
+     */
+    public boolean routeManagementEvent(ObjectNode record) {
         String eventRegion = record.path("awsRegion").asText();
         String eventSource = record.path("eventSource").asText();
         boolean readOnly = record.path("readOnly").asBoolean();
+        boolean covered = false;
         for (String k : store.keys()) {
             CloudTrailEntry entry = store.get(k).orElse(null);
             String trailRegion = regionFromKey(k);
@@ -399,11 +407,13 @@ public class CloudTrailService {
                     eventSource, readOnly)) {
                 continue;
             }
+            covered = true;
             if (!append(new TrailKey(trailRegion, entry.trail().name(), eventRegion), record.deepCopy())) {
                 LOG.tracev("Dropped CloudTrail event {0} for trail {1}: retry buffer is full",
                         record.path("eventName").asText(), entry.trail().name());
             }
         }
+        return covered;
     }
 
     public void requeueRecords(TrailKey key, List<ObjectNode> records) {
