@@ -59,8 +59,6 @@ public class EventBridgeService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
     private static final List<String> REQUIRED_ENTRY_FIELDS = List.of("Source", "DetailType", "Detail");
-    /** Entry key marking a read-only CloudTrail management event, which plain ENABLED rules never match. */
-    public static final String CLOUDTRAIL_READ_ONLY_MANAGEMENT_EVENT = "CloudTrailReadOnlyManagementEvent";
 
     private final StorageBackend<String, EventBus> busStore;
     private final StorageBackend<String, Rule> ruleStore;
@@ -866,10 +864,11 @@ public class EventBridgeService implements ResourceProvider {
             String eventId = UUID.randomUUID().toString();
             String rulePrefix = ruleKeyPrefix(region, effectiveBus);
             List<Rule> candidateRules = accountScan(ruleStore, accountId, k -> k.startsWith(rulePrefix));
+            boolean cloudTrailReadOnly = isCloudTrailReadOnlyManagementEvent(entry);
 
             for (Rule rule : candidateRules) {
-                if (rule.getState() == RuleState.DISABLED || (rule.getState() == RuleState.ENABLED
-                        && entry.containsKey(CLOUDTRAIL_READ_ONLY_MANAGEMENT_EVENT))) {
+                if (rule.getState() == RuleState.DISABLED
+                        || (rule.getState() == RuleState.ENABLED && cloudTrailReadOnly)) {
                     continue;
                 }
                 // A rule without an event pattern is a schedule rule: it never matches put events.
@@ -895,6 +894,24 @@ public class EventBridgeService implements ResourceProvider {
         }
 
         return new PutEventsResult(failed, resultEntries);
+    }
+
+    /**
+     * Whether the entry is a read-only management event from CloudTrail, which only rules in state
+     * ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS match. Read from the event itself, so it holds
+     * when the event is forwarded to another bus or replayed from an archive.
+     */
+    private boolean isCloudTrailReadOnlyManagementEvent(Map<String, Object> entry) {
+        if (!(entry.get("Source") instanceof String source) || !source.startsWith("aws.")
+                || !(entry.get("DetailType") instanceof String detailType) || !detailType.endsWith(" via CloudTrail")) {
+            return false;
+        }
+        try {
+            JsonNode detail = objectMapper.readTree((String) entry.get("Detail"));
+            return detail.path("managementEvent").asBoolean() && detail.path("readOnly").asBoolean();
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     private boolean isValidDetailJson(Map<String, Object> detail) {

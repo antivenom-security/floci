@@ -134,9 +134,11 @@ default event bus of its record's region (`us-east-1` for global services),
 as `AWS API Call via CloudTrail` (or `AWS Service Event via CloudTrail`) with
 `source` `aws.<service>`, `resources` `[]` and the record as `detail`. Write
 management events and data events match `ENABLED` rules. Read-only management
-events match only rules in state `ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS`.
-Records over 256 KB are not sent. `eventbridge-delay-seconds` holds events back
-before they are sent; AWS documents no delay, so the default is 0.
+events match only rules in state `ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS`,
+on the default bus, on buses they are forwarded to and on replay. Events over
+256 KB are not sent. Events are sent in the background, after
+`eventbridge-delay-seconds` (AWS documents no delay, so the default is 0); past
+10,000 waiting events, new ones are dropped with a warning.
 
 Known gaps:
 

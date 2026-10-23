@@ -15,6 +15,7 @@ import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridge.model.EventBridgeException;
 import software.amazon.awssdk.services.eventbridge.model.RuleState;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
@@ -29,6 +30,8 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -99,6 +102,63 @@ class CloudTrailEventBridgeIntegrationTest {
     }
 
     @Test
+    void aReadOnlyEventForwardedToAnotherBusStillReachesOnlyAllManagementRules() throws Exception {
+        Account account = new Account();
+        account.startTrail();
+        String pattern = "{\"source\":[\"aws.secretsmanager\"],\"detail\":{\"eventName\":[\"GetSecretValue\"]}}";
+        String enabled;
+        String all;
+        try (EventBridgeClient events = account.client(EventBridgeClient.builder(), Region.US_EAST_1)) {
+            String busArn = events.createEventBus(r -> r.name("downstream")).eventBusArn();
+            events.putRule(r -> r.name("to-downstream").eventPattern(pattern)
+                    .state(RuleState.ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS));
+            events.putTargets(r -> r.rule("to-downstream").targets(t -> t.id("bus").arn(busArn)));
+            enabled = account.ruleToQueue("downstream-writes", "downstream", pattern, RuleState.ENABLED);
+            all = account.ruleToQueue("downstream-all", "downstream", pattern,
+                    RuleState.ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS);
+        }
+        String name = "eb-secret-" + UUID.randomUUID().toString().substring(0, 8);
+        try (SecretsManagerClient secrets = account.client(SecretsManagerClient.builder(), Region.US_EAST_1)) {
+            secrets.createSecret(r -> r.name(name).secretString("value"));
+            secrets.getSecretValue(r -> r.secretId(name));
+        }
+
+        JsonNode event = mapper.readTree(account.receive(all, 20).get(0).body());
+        assertEquals("GetSecretValue", event.path("detail").path("eventName").asText());
+        assertTrue(account.receive(enabled, 2).isEmpty());
+    }
+
+    @Test
+    void putRuleRefusesAStateOutsideAwsValues() {
+        Account account = new Account();
+        try (EventBridgeClient events = account.client(EventBridgeClient.builder(), Region.US_EAST_1)) {
+            EventBridgeException thrown = assertThrows(EventBridgeException.class,
+                    () -> events.putRule(r -> r.name("lowercase").eventPattern(IAM_PATTERN).state("enabled")));
+            assertEquals("ValidationException", thrown.awsErrorDetails().errorCode());
+        }
+    }
+
+    @Test
+    void aCloudFormationRuleWithAnUnknownStateFails() {
+        String stack = "cfn-ct-bad-" + UUID.randomUUID().toString().substring(0, 8);
+        given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", stack)
+                .formParam("TemplateBody", """
+                        {"Resources": {"Rule": {"Type": "AWS::Events::Rule", "Properties": {
+                          "Name": "%s", "EventPattern": {"source": ["aws.iam"]}, "State": "On"}}}}""".formatted(stack))
+                .when().post("/").then().statusCode(200);
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack);
+        assertNotEquals("CREATE_COMPLETE", state.status());
+        String reasons = given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stack)
+                .when().post("/").then().statusCode(200).extract().asString();
+        assertTrue(reasons.contains("Member must satisfy enum value set"), reasons);
+    }
+
+    @Test
     void withoutATrailNothingIsDelivered() {
         Account account = new Account();
         String queueUrl = account.ruleToQueue("no-trail", IAM_PATTERN, RuleState.ENABLED);
@@ -149,13 +209,17 @@ class CloudTrailEventBridgeIntegrationTest {
         }
 
         String ruleToQueue(String rule, String pattern, RuleState state) {
+            return ruleToQueue(rule, "default", pattern, state);
+        }
+
+        String ruleToQueue(String rule, String bus, String pattern, RuleState state) {
             try (SqsClient sqs = client(SqsClient.builder(), Region.US_EAST_1);
                  EventBridgeClient events = client(EventBridgeClient.builder(), Region.US_EAST_1)) {
                 String queueUrl = sqs.createQueue(r -> r.queueName(rule)).queueUrl();
                 String queueArn = sqs.getQueueAttributes(r -> r.queueUrl(queueUrl)
                         .attributeNames(QueueAttributeName.QUEUE_ARN)).attributes().get(QueueAttributeName.QUEUE_ARN);
-                events.putRule(r -> r.name(rule).eventPattern(pattern).state(state));
-                events.putTargets(r -> r.rule(rule).targets(t -> t.id("queue").arn(queueArn)));
+                events.putRule(r -> r.name(rule).eventBusName(bus).eventPattern(pattern).state(state));
+                events.putTargets(r -> r.rule(rule).eventBusName(bus).targets(t -> t.id("queue").arn(queueArn)));
                 return queueUrl;
             }
         }
