@@ -204,6 +204,7 @@ class CloudTrailDeliveryIntegrationTest {
 
         Assumptions.assumeTrue(dockerAvailable(), "Docker is needed to run the AWS CLI's validate-logs");
         Process cli = new ProcessBuilder("docker", "run", "--rm",
+                "--add-host=host.docker.internal:host-gateway",
                 "-e", "AWS_ACCESS_KEY_ID=test", "-e", "AWS_SECRET_ACCESS_KEY=test",
                 "-e", "AWS_DEFAULT_REGION=" + REGION,
                 "-e", "AWS_ENDPOINT_URL=http://host.docker.internal:" + endpoint.getPort(),

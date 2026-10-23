@@ -82,6 +82,7 @@ class CloudFormationSmallMetadataIntegrationTest {
                         "ResourceType": "VPC",
                         "TrafficType": "ALL",
                         "LogDestinationType": "cloud-watch-logs",
+                        "DeliverLogsPermissionArn": "arn:aws:iam::000000000000:role/flow-logs",
                         "LogDestination": "arn:aws:logs:us-east-1:000000000000:log-group:/flow/meta"
                       }
                     }
@@ -190,6 +191,7 @@ class CloudFormationSmallMetadataIntegrationTest {
                         "ResourceType": "VPC",
                         "TrafficType": "REJECT",
                         "LogDestinationType": "cloud-watch-logs",
+                        "DeliverLogsPermissionArn": "arn:aws:iam::000000000000:role/flow-logs",
                         "LogDestination": "arn:aws:logs:us-east-1:000000000000:log-group:/flow/del"
                       }
                     }
