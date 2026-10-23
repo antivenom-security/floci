@@ -27,11 +27,17 @@ The product image is the JVM image (see the design spec's Decisions). From the m
 
 ## Syncing with upstream
 
-Upstream releases on the 15th and the last day of each month. After each release, run `just floci-sync` from the monorepo root. It does this:
+> [!WARNING]
+> **Merge upstream into `av/main`. Never rebase or force-push it.** The antivenom monorepo pins `av/main` commits by ID in its `floci/` submodule. A rebase gives every commit a new ID and drops merge commits. After a force-push, the pinned commit is on no branch, and `git submodule update` can fail for every antivenom checkout.
+>
+> `just floci-sync` still rebases and force-pushes. **Don't run it** until it's changed to merge. Sync by hand with the steps below.
 
-1. `git fetch upstream`
-2. Fast-forward fork `main` to `upstream/main`.
-3. Rebase `av/main` onto `upstream/main`.
-4. Push with `--force-with-lease`.
+Upstream releases on the 15th and the last day of each month. After each release, from the monorepo root:
 
-Then run `just floci-check` and `just floci-test`, rebuild the image, and commit the new submodule pointer in the monorepo.
+1. `git -C floci fetch upstream && git -C floci fetch origin`
+2. Mirror upstream into the fork's `main`, a fast-forward only: `git -C floci push origin upstream/main:refs/heads/main`
+3. Update `av/main`: `git -C floci checkout av/main && git -C floci merge --ff-only origin/av/main`
+4. Merge upstream into it: `git -C floci merge upstream/main`. Resolve any conflicts. Commits must be signed (`commit.gpgsign`), or the fork's PR Hygiene check fails.
+5. Push normally, with no force: `git -C floci push origin av/main`
+
+Then run `just floci-check` and the full test suite. The suite is too heavy for an 8 GB Mac: use the fork's CI on a PR, or a bigger Linux box running CI's four shards (`.github/ci/partition.sh`). Rebuild the image with `just floci-image`, and commit the new submodule pointer in the monorepo.
