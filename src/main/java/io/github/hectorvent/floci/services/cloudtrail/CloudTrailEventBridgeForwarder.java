@@ -16,9 +16,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Sends a record that a logging trail covers to the default bus of its region, as CloudTrail does:
- * {@code source} {@code aws.<service>}, a detail-type by {@code eventType}, no resources and the
- * record as {@code detail}. Read-only management events match only rules in state
+ * Sends a record that a logging trail covers to the default bus of its account and region, as
+ * CloudTrail does: {@code source} {@code aws.<service>}, a detail-type by {@code eventType}, no
+ * resources and the record as {@code detail}. Read-only management events match only rules in state
  * {@code ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS}; records over 256 KB are not sent.
  */
 @ApplicationScoped
@@ -61,11 +61,11 @@ public class CloudTrailEventBridgeForwarder {
                 entry.put(EventBridgeService.CLOUDTRAIL_READ_ONLY_MANAGEMENT_EVENT, true);
             }
             String region = record.path("awsRegion").asText();
+            String account = record.path("recipientAccountId").asText();
             if (delaySeconds <= 0) {
-                eventBridge.putEvents(List.of(entry), region);
+                send(entry, region, account);
                 return;
             }
-            String account = record.path("recipientAccountId").asText();
             CompletableFuture.delayedExecutor(delaySeconds, TimeUnit.SECONDS).execute(() -> send(entry, region, account));
         } catch (Exception e) {
             LOG.warnv(e, "Failed to send CloudTrail event {0} to EventBridge", record.path("eventName").asText());
@@ -76,7 +76,7 @@ public class CloudTrailEventBridgeForwarder {
         try {
             RequestScopes.runAs(account, region, () -> eventBridge.putEvents(List.of(entry), region));
         } catch (Exception e) {
-            LOG.warnv(e, "Failed to send delayed CloudTrail event to EventBridge");
+            LOG.warnv(e, "Failed to send CloudTrail event to EventBridge");
         }
     }
 }
