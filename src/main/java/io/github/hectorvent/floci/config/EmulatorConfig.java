@@ -1089,6 +1089,14 @@ public interface EmulatorConfig {
     interface Route53ResolverServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** How often query logs are written to S3 destinations. AWS publishes about every 5 minutes. */
+        @WithDefault("300")
+        int queryLogS3IntervalSeconds();
+
+        /** How often query logs are written to CloudWatch Logs destinations. */
+        @WithDefault("60")
+        int queryLogCloudwatchIntervalSeconds();
     }
 
     interface NetworkFirewallServiceConfig {
@@ -1225,6 +1233,33 @@ public interface EmulatorConfig {
          *  default here is 60s so dev/CI feedback loops stay fast. */
         @WithDefault("60")
         int flushIntervalSeconds();
+
+        CloudTrailManagementEventsConfig managementEvents();
+
+        CloudTrailEventHistoryConfig eventHistory();
+
+        /** LookupEvents calls allowed per second per account and region, AWS's 2 TPS. */
+        @WithDefault("2")
+        int lookupRateLimitPerSecond();
+
+        /** Record the first X-Forwarded-For address as sourceIPAddress instead of the TCP peer. */
+        @WithDefault("false")
+        boolean trustForwardedFor();
+    }
+
+    interface CloudTrailManagementEventsConfig {
+        /** Record management events into event history and route them to trails. */
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CloudTrailEventHistoryConfig {
+        @WithDefault("90")
+        int retentionDays();
+
+        /** Oldest events are evicted past this many, across all accounts and regions. */
+        @WithDefault("200000")
+        int maxEvents();
     }
 
     interface ResourceExplorer2ServiceConfig {

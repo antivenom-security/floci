@@ -452,6 +452,13 @@ floci:
     cloudtrail:
       enabled: true
       flush-interval-seconds: 3600
+      management-events:
+        enabled: true
+      event-history:
+        retention-days: 90
+        max-events: 200000
+      lookup-rate-limit-per-second: 2
+      trust-forwarded-for: false
     lightsail:
       enabled: true
     cloudcontrol:
@@ -528,6 +535,8 @@ floci:
       seed-landing-zone: true
     route53resolver:
       enabled: true
+      query-log-s3-interval-seconds: 300
+      query-log-cloudwatch-interval-seconds: 60
     connect:
       enabled: true
     appintegrations:

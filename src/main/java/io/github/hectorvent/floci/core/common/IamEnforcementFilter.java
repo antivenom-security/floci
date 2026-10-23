@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailCaptureFilter;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.cloudtrail.record.TlsDetails;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
@@ -1428,13 +1429,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     if (req != null) {
                         tlsDetails = TlsDetails.of(req);
                         userAgent = req.getHeader("User-Agent");
-                        String fwd = req.getHeader("X-Forwarded-For");
-                        if (fwd != null && !fwd.isBlank()) {
-                            int comma = fwd.indexOf(',');
-                            sourceIp = (comma > 0 ? fwd.substring(0, comma) : fwd).trim();
-                        } else if (req.remoteAddress() != null) {
-                            sourceIp = req.remoteAddress().host();
-                        }
+                        sourceIp = CloudTrailCaptureFilter.sourceIp(req,
+                                config.services().cloudtrail().trustForwardedFor());
                     }
                 }
             } catch (Exception e) {

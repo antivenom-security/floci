@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.services.cloudtrail.ServiceEventEmitter;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
@@ -24,12 +25,18 @@ final class Ec2InstanceCredentials {
     private static final String IDENTITY_ROLE_NAME = "aws:ec2-instance";
 
     private final IamService iam;
+    private final ServiceEventEmitter serviceEvents;
     private final SecureRandom random = new SecureRandom();
     private final Map<Instance, List<Issued>> sessions = new IdentityHashMap<>();
     private final Map<Instance, List<SessionCredential>> identitySessions = new IdentityHashMap<>();
 
     Ec2InstanceCredentials(IamService iam) {
+        this(iam, null);
+    }
+
+    Ec2InstanceCredentials(IamService iam, ServiceEventEmitter serviceEvents) {
         this.iam = iam;
+        this.serviceEvents = serviceEvents;
     }
 
     synchronized void register(Instance instance) {
@@ -164,6 +171,11 @@ final class Ec2InstanceCredentials {
         session.setEc2RoleId(role.getRoleId());
         session.setAssumedRoleId(role.getRoleId() + ":" + instance.getInstanceId());
         iam.registerEc2InstanceSession(session);
+        if (serviceEvents != null) {
+            serviceEvents.assumeRole("ec2", instance.getRegion(), role.getArn(), instance.getInstanceId(),
+                    session.getAccessKeyId(), session.getSessionToken(), session.getAssumedRoleId(),
+                    session.getExpiration());
+        }
         history.add(new Issued(session, role.getRoleId(), instance.getIamInstanceProfileArn()));
         return Optional.of(session);
     }

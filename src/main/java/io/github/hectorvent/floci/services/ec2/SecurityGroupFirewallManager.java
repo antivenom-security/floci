@@ -45,6 +45,7 @@ public class SecurityGroupFirewallManager {
     private final EmulatorConfig config;
     private final EmbeddedDnsServer embeddedDnsServer;
     private final Map<String, ProtectedEndpoint> endpoints = new HashMap<>();
+    private volatile Map<String, SecurityGroupNftCompiler.Endpoint> endpointsByTransport = Map.of();
 
     @Inject
     public SecurityGroupFirewallManager(DockerClient dockerClient, ContainerBuilder containerBuilder,
@@ -178,9 +179,21 @@ public class SecurityGroupFirewallManager {
             } else {
                 endpoints.put(endpoint.eniId(), previous);
             }
+            indexTransportAddresses();
             quarantine(helperId);
             throw e;
         }
+    }
+
+    /** The managed ENI whose namespace holds {@code transportAddress} on Docker; lock-free for the DNS path. */
+    public Optional<SecurityGroupNftCompiler.Endpoint> endpointAt(String transportAddress) {
+        return Optional.ofNullable(endpointsByTransport.get(transportAddress));
+    }
+
+    private void indexTransportAddresses() {
+        Map<String, SecurityGroupNftCompiler.Endpoint> index = new HashMap<>();
+        endpoints.values().forEach(e -> index.putIfAbsent(e.endpoint().transportAddress(), e.endpoint()));
+        endpointsByTransport = Map.copyOf(index);
     }
 
     /** The managed ENIs and the helpers owning their namespaces, as flow capture polls them. */
@@ -230,6 +243,7 @@ public class SecurityGroupFirewallManager {
                 endpoints.remove(entry.getKey());
             }
         }
+        indexTransportAddresses();
         List<SecurityGroupNftCompiler.Endpoint> peers = endpoints.values().stream()
                 .map(ProtectedEndpoint::endpoint).toList();
         List<String> vpcResolvers = vpcResolvers();

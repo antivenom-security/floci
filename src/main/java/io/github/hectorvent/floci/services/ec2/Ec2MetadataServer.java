@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.cloudtrail.ServiceEventEmitter;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -68,15 +69,25 @@ public class Ec2MetadataServer {
 
     private volatile HttpServer httpServer;
 
-    @Inject
     public Ec2MetadataServer(Vertx vertx, EmulatorConfig config, IamService iamService) {
         this(vertx, config, iamService, Clock.systemUTC());
     }
 
+    @Inject
+    public Ec2MetadataServer(Vertx vertx, EmulatorConfig config, IamService iamService,
+                             ServiceEventEmitter serviceEvents) {
+        this(vertx, config, iamService, Clock.systemUTC(), serviceEvents);
+    }
+
     Ec2MetadataServer(Vertx vertx, EmulatorConfig config, IamService iamService, Clock clock) {
+        this(vertx, config, iamService, clock, null);
+    }
+
+    private Ec2MetadataServer(Vertx vertx, EmulatorConfig config, IamService iamService, Clock clock,
+                              ServiceEventEmitter serviceEvents) {
         this.vertx = vertx;
         this.config = config;
-        this.credentials = new Ec2InstanceCredentials(iamService);
+        this.credentials = new Ec2InstanceCredentials(iamService, serviceEvents);
         this.clock = clock;
     }
 

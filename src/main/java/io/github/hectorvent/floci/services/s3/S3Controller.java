@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestIdFilter;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailCaptureFilter;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.cloudtrail.record.TlsDetails;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -177,13 +178,8 @@ public class S3Controller {
                         tlsDetails = TlsDetails.of(req);
                         authHeader = req.getHeader("Authorization");
                         userAgent = req.getHeader("User-Agent");
-                        String fwd = req.getHeader("X-Forwarded-For");
-                        if (fwd != null && !fwd.isBlank()) {
-                            int comma = fwd.indexOf(',');
-                            sourceIp = (comma > 0 ? fwd.substring(0, comma) : fwd).trim();
-                        } else if (req.remoteAddress() != null) {
-                            sourceIp = req.remoteAddress().host();
-                        }
+                        sourceIp = CloudTrailCaptureFilter.sourceIp(req,
+                                config.services().cloudtrail().trustForwardedFor());
                     }
                 }
             } catch (Exception e) {

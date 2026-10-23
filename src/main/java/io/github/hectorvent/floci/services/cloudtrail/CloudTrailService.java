@@ -385,6 +385,27 @@ public class CloudTrailService {
         }
     }
 
+    /** Appends a management event record to every logging trail whose region and selectors cover it. */
+    public void routeManagementEvent(ObjectNode record) {
+        String eventRegion = record.path("awsRegion").asText();
+        String eventSource = record.path("eventSource").asText();
+        boolean readOnly = record.path("readOnly").asBoolean();
+        for (String k : store.keys()) {
+            CloudTrailEntry entry = store.get(k).orElse(null);
+            String trailRegion = regionFromKey(k);
+            if (entry == null || !entry.logging()
+                    || (!trailRegion.equals(eventRegion) && !entry.trail().isMultiRegionTrail())
+                    || !TrailRouter.logsManagementEvent(entry.selectors(), entry.advancedSelectors(),
+                    eventSource, readOnly)) {
+                continue;
+            }
+            if (!append(new TrailKey(trailRegion, entry.trail().name(), eventRegion), record.deepCopy())) {
+                LOG.tracev("Dropped CloudTrail event {0} for trail {1}: retry buffer is full",
+                        record.path("eventName").asText(), entry.trail().name());
+            }
+        }
+    }
+
     public void requeueRecords(TrailKey key, List<ObjectNode> records) {
         if (!records.isEmpty()) {
             List<PendingRecord> pending = records.stream()
@@ -720,9 +741,11 @@ public class CloudTrailService {
             case "resources.ARN" -> s3ObjectArn;
             default -> null;
         };
-        if (value == null) {
-            return false;
-        }
+        return value != null && matchesFieldValue(fs, value);
+    }
+
+    /** Whether {@code value} passes every operator of {@code fs}. */
+    static boolean matchesFieldValue(AdvancedFieldSelector fs, String value) {
         if (!isEmpty(fs.equalsValues()) && fs.equalsValues().stream().noneMatch(value::equals)) {
             return false;
         }

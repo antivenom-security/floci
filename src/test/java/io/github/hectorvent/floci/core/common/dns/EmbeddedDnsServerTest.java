@@ -4,15 +4,18 @@ import io.vertx.core.Vertx;
 import io.vertx.core.WorkerExecutor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -429,6 +432,97 @@ class EmbeddedDnsServerTest {
 
         assertEquals(15, buffer.getInt(firstTtl));
         assertEquals(15, buffer.getInt(firstTtl + 16));
+    }
+
+    @Test
+    void parseExchange_readsTheQuestionCodeAndEveryAnswer() {
+        byte[] query = buildQuery("www.sapphire.internal", (short) 7);
+        DnsAnswer answer = DnsAnswer.typedRecords(List.of(new DnsRecord.Cname("api.sapphire.internal"),
+                new DnsRecord.Address(1, "172.31.0.6")), 30);
+        byte[] response = dns.buildAResponse(query, (short) 7, 12, query.length, answer);
+
+        DnsQueryObserver.Query parsed = EmbeddedDnsServer.parseExchange(Instant.EPOCH,
+                "10.0.0.5", 40000, response);
+
+        assertEquals("www.sapphire.internal", parsed.name());
+        assertEquals(1, parsed.type());
+        assertEquals(1, parsed.queryClass());
+        assertEquals(0, parsed.responseCode());
+        assertEquals(List.of(new DnsQueryObserver.Answer("api.sapphire.internal.", 5, 1),
+                new DnsQueryObserver.Answer("172.31.0.6", 1, 1)), parsed.answers());
+    }
+
+    @Test
+    void parseExchange_readsNxdomainWithNoAnswers() {
+        byte[] query = buildQuery("missing.sapphire.internal", (short) 8);
+        byte[] response = dns.buildEmptyResponse(query, (short) 8, 12, query.length, 3);
+
+        DnsQueryObserver.Query parsed = EmbeddedDnsServer.parseExchange(Instant.EPOCH,
+                "10.0.0.5", 40000, response);
+
+        assertEquals(3, parsed.responseCode());
+        assertEquals(List.of(), parsed.answers());
+    }
+
+    @Test
+    void parseExchange_rendersTxtAndSoaAsText() {
+        byte[] query = buildQuery("txt.sapphire.internal", (short) 9);
+        DnsAnswer answer = DnsAnswer.typedRecords(List.of(new DnsRecord.Txt("\"v=spf1 -all\""),
+                new DnsRecord.Soa("ns.example. host.example. 1 7200 900 1209600 30")), 30);
+        byte[] response = dns.buildAResponse(query, (short) 9, 12, query.length, answer);
+
+        List<DnsQueryObserver.Answer> answers = EmbeddedDnsServer.parseExchange(Instant.EPOCH,
+                "10.0.0.5", 40000, response).answers();
+
+        assertEquals("\"v=spf1 -all\"", answers.get(0).data());
+        assertEquals("ns.example. host.example. 1 7200 900 1209600 30", answers.get(1).data());
+    }
+
+    @Test
+    @Timeout(30)
+    void observe_dropsAndCountsWhenObserversFallBehindInsteadOfQueueingForever() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        EmbeddedDnsServer observed = new EmbeddedDnsServer(List.of(), List.of(), List.of(), List.of(),
+                List.of(query -> {
+                    try {
+                        release.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }));
+        byte[] response = dns.buildEmptyResponse(buildQuery("a.sapphire.internal", (short) 1),
+                (short) 1, 12, buildQuery("a.sapphire.internal", (short) 1).length, 3);
+        try {
+            for (int i = 0; i < EmbeddedDnsServer.OBSERVER_QUEUE_SIZE + 10; i++) {
+                observed.observe(Instant.EPOCH, "10.0.0.5", 40000, response);
+            }
+            assertTrue(observed.droppedObservations() >= 9, "dropped " + observed.droppedObservations());
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void handleQuery_tellsObserversWhatTheClientWasAnswered() throws Exception {
+        CompletableFuture<DnsQueryObserver.Query> seen = new CompletableFuture<>();
+        EmbeddedDnsServer observed = new EmbeddedDnsServer(List.of(), List.of(), List.of(), List.of(),
+                List.of(seen::complete));
+        Vertx vertx = Vertx.vertx();
+        try {
+            // java.net.DatagramSocket is imported for the upstream stand-ins; this one is Vert.x's.
+            io.vertx.core.datagram.DatagramSocket server = vertx.createDatagramSocket();
+            server.listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            observed.handleQuery(vertx, server, buildQuery("bucket.localhost.floci.io", (short) 3),
+                    "127.0.0.1", 40001, "172.31.0.2");
+
+            DnsQueryObserver.Query query = seen.get(5, TimeUnit.SECONDS);
+            assertEquals("127.0.0.1", query.sourceAddress());
+            assertEquals(40001, query.sourcePort());
+            assertEquals("bucket.localhost.floci.io", query.name());
+            assertEquals(List.of(new DnsQueryObserver.Answer("172.31.0.2", 1, 1)), query.answers());
+        } finally {
+            vertx.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        }
     }
 
     // ── spoof-aws-endpoints: transparent endpoint injection ──────────────────
