@@ -42,7 +42,7 @@ class Route53ResolverQueryLogIntegrationTest {
                 .body("ResolverQueryLogConfig.Status", equalTo("CREATED"))
                 .body("ResolverQueryLogConfig.AssociationCount", equalTo(0));
 
-        String associate = "{\"ResolverQueryLogConfigId\":\"" + id + "\",\"ResourceId\":\"vpc-0ql0000\"}";
+        String associate = "{\"ResolverQueryLogConfigId\":\"" + id + "\",\"ResourceId\":\"vpc-default-us-east-1\"}";
         String associationId = call("AssociateResolverQueryLogConfig", associate).statusCode(200)
                 .body("ResolverQueryLogConfigAssociation.Status", equalTo("CREATING"))
                 .body("ResolverQueryLogConfigAssociation.Error", equalTo("NONE"))
@@ -52,7 +52,7 @@ class Route53ResolverQueryLogIntegrationTest {
         String getAssociation = "{\"ResolverQueryLogConfigAssociationId\":\"" + associationId + "\"}";
         call("GetResolverQueryLogConfigAssociation", getAssociation).statusCode(200)
                 .body("ResolverQueryLogConfigAssociation.Status", equalTo("ACTIVE"))
-                .body("ResolverQueryLogConfigAssociation.ResourceId", equalTo("vpc-0ql0000"));
+                .body("ResolverQueryLogConfigAssociation.ResourceId", equalTo("vpc-default-us-east-1"));
         call("ListResolverQueryLogConfigAssociations", "{}").statusCode(200)
                 .body("ResolverQueryLogConfigAssociations.Id", hasItem(associationId));
         call("ListResolverQueryLogConfigs", "{}").statusCode(200)
@@ -68,6 +68,16 @@ class Route53ResolverQueryLogIntegrationTest {
                 .body("ResolverQueryLogConfig.Status", equalTo("DELETING"));
         call("GetResolverQueryLogConfig", "{\"ResolverQueryLogConfigId\":\"" + id + "\"}").statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void associatingAnUnknownVpcIsNotFound() {
+        String id = call("CreateResolverQueryLogConfig", """
+                {"Name":"nv","DestinationArn":"arn:aws:s3:::query-logs","CreatorRequestId":"%s"}
+                """.formatted(UUID.randomUUID())).statusCode(200).extract().path("ResolverQueryLogConfig.Id");
+        call("AssociateResolverQueryLogConfig",
+                "{\"ResolverQueryLogConfigId\":\"" + id + "\",\"ResourceId\":\"vpc-0doesnotexist\"}")
+                .statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
