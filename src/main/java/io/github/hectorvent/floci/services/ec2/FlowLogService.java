@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -123,6 +124,7 @@ public class FlowLogService {
     private final Map<String, Window> windows = new HashMap<>();
     private final Map<String, List<String>> pendingS3 = new HashMap<>();
     private final Map<String, Instant> lastS3Publish = new HashMap<>();
+    private static final int MAX_PENDING_S3_ROWS = 100_000;
     private ScheduledExecutorService scheduler;
 
     @Inject
@@ -130,9 +132,13 @@ public class FlowLogService {
                           StorageFactory storageFactory, EmulatorConfig config) {
         this(ec2Service, s3Service, logsService,
                 storageFactory.create("ec2", "ec2-flow-logs.json", new TypeReference<Map<String, FlowLog>>() {}),
-                config.services().ec2().flowLogs().mode()
-                        .orElse(config.network().securityGroupEnforcement().enabled() ? "observed" : "synthetic"),
-                config.services().ec2().flowLogs().s3PublishIntervalSeconds());
+                resolveMode(config), config.services().ec2().flowLogs().s3PublishIntervalSeconds());
+    }
+
+    /** The configured mode, or observed when security-group enforcement is on and synthetic otherwise. */
+    static String resolveMode(EmulatorConfig config) {
+        return config.services().ec2().flowLogs().mode()
+                .orElse(config.network().securityGroupEnforcement().enabled() ? "observed" : "synthetic");
     }
 
     // Package-private for hermetic tests (pass an in-memory StorageBackend directly).
@@ -168,9 +174,23 @@ public class FlowLogService {
         LOG.info("FlowLog generator scheduled (every 60s)");
     }
 
-    void onStop(@Observes ShutdownEvent ev) {
+    /** Runs before storage teardown, so the open windows still reach their destinations. */
+    void onStop(@Observes @Priority(1000) ShutdownEvent ev) {
         if (scheduler != null) {
             scheduler.shutdownNow();
+        }
+        if ("observed".equals(mode)) {
+            flushOpenWindows(Instant.now());
+        }
+    }
+
+    synchronized void flushOpenWindows(Instant now) {
+        for (FlowLog fl : flowLogs.scan(k -> true)) {
+            Window window = windows.remove(fl.getFlowLogId());
+            if (window != null) {
+                deliver(fl, window, now.getEpochSecond());
+            }
+            flushS3(fl, now);
         }
     }
 
@@ -255,7 +275,9 @@ public class FlowLogService {
         fl.setResourceType(resourceType);
         fl.setTrafficType(traffic);
         fl.setLogDestinationType(destinationType);
-        fl.setLogDestination(logDestination);
+        fl.setLogDestination(logDestination == null && groupName != null
+                ? AwsArnUtils.Arn.of("logs", region, ec2Service.callerAccountId(), "log-group:" + groupName).toString()
+                : logDestination);
         fl.setLogGroupName(groupName);
         fl.setDeliverLogsPermissionArn(deliverLogsPermissionArn);
         fl.setBucketName("s3".equals(destinationType) ? bucketFromArn(logDestination) : null);
@@ -359,17 +381,23 @@ public class FlowLogService {
                 deliver(fl, window, now.getEpochSecond());
                 windows.put(id, new Window(now.getEpochSecond()));
             }
-            List<String> pending = pendingS3.get(id);
-            if (pending != null && !pending.isEmpty()
-                    && !now.isBefore(lastS3Publish.get(id).plusSeconds(s3PublishIntervalSeconds))) {
-                writeS3(fl, pending, now);
-                pending.clear();
-                lastS3Publish.put(id, now);
+            if (!now.isBefore(lastS3Publish.get(id).plusSeconds(s3PublishIntervalSeconds))) {
+                flushS3(fl, now);
             }
         }
         windows.keySet().retainAll(ids);
         pendingS3.keySet().retainAll(ids);
         lastS3Publish.keySet().retainAll(ids);
+    }
+
+    /** Whether any flow log covers this ENI, so its traffic is worth polling. */
+    public boolean observes(FlowEni eni) {
+        for (FlowLog fl : flowLogs.scan(k -> true)) {
+            if (covers(fl, eni)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean covers(FlowLog fl, FlowEni eni) {
@@ -449,16 +477,27 @@ public class FlowLogService {
         }
     }
 
-    private void writeS3(FlowLog fl, List<String> rows, Instant now) {
+    /** Writes the pending rows as one file. Rows a failed write could not deliver wait for the next one. */
+    private void flushS3(FlowLog fl, Instant now) {
+        List<String> pending = pendingS3.get(fl.getFlowLogId());
+        lastS3Publish.put(fl.getFlowLogId(), now);
+        if (pending == null || pending.isEmpty()) {
+            return;
+        }
         String key = s3Key(fl, now);
         try {
             s3Service.putObject(fl.getBucketName(), key,
-                    gzip(String.join(" ", fieldsOf(fl)) + "\n" + String.join("\n", rows) + "\n"),
+                    gzip(String.join(" ", fieldsOf(fl)) + "\n" + String.join("\n", pending) + "\n"),
                     "application/octet-stream", Map.of("content-encoding", "gzip"));
-            LOG.debugv("Delivered {0} flow records to s3://{1}/{2}", rows.size(), fl.getBucketName(), key);
+            LOG.debugv("Delivered {0} flow records to s3://{1}/{2}", pending.size(), fl.getBucketName(), key);
+            pending.clear();
         } catch (RuntimeException e) {
-            LOG.warnv("Flow log {0} could not deliver {1} records to s3://{2}/{3}: {4}",
-                    fl.getFlowLogId(), rows.size(), fl.getBucketName(), key, e.getMessage());
+            LOG.warnv("Flow log {0} could not deliver {1} records to s3://{2}/{3}, retrying next interval: {4}",
+                    fl.getFlowLogId(), pending.size(), fl.getBucketName(), key, e.getMessage());
+            if (pending.size() > MAX_PENDING_S3_ROWS) {
+                // shortcut: drops the oldest rows past the cap, until destinations report delivery errors.
+                pending.subList(0, pending.size() - MAX_PENDING_S3_ROWS).clear();
+            }
         }
     }
 

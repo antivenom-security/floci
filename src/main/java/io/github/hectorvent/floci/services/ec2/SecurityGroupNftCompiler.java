@@ -36,10 +36,16 @@ public final class SecurityGroupNftCompiler {
             + "flags dynamic,timeout; timeout 5m; size 65536; }\n"
             + "add chain inet floci_sg fl_reject\n"
             + "flush chain inet floci_sg fl_reject\n"
-            + "add rule inet floci_sg fl_reject meta nfproto ipv4 "
+            + "add rule inet floci_sg fl_reject meta nfproto ipv4 meta l4proto { tcp, udp } "
             + "update @fl_rej4 { ip saddr . th sport . ip daddr . th dport . meta l4proto counter }\n"
-            + "add rule inet floci_sg fl_reject meta nfproto ipv6 "
+            + "add rule inet floci_sg fl_reject meta nfproto ipv6 meta l4proto { tcp, udp } "
             + "update @fl_rej6 { ip6 saddr . th sport . ip6 daddr . th dport . meta l4proto counter }\n"
+            // Without ports the transport header starts with ICMP type, code and checksum, so every
+            // ping would be its own element.
+            + "add rule inet floci_sg fl_reject meta nfproto ipv4 meta l4proto != { tcp, udp } "
+            + "update @fl_rej4 { ip saddr . 0 . ip daddr . 0 . meta l4proto counter }\n"
+            + "add rule inet floci_sg fl_reject meta nfproto ipv6 meta l4proto != { tcp, udp } "
+            + "update @fl_rej6 { ip6 saddr . 0 . ip6 daddr . 0 . meta l4proto counter }\n"
             + "add rule inet floci_sg fl_reject drop\n";
 
     public static String initialRuleset() {

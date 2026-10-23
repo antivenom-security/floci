@@ -71,4 +71,58 @@ class FlowCaptureServiceTest {
                 new FlowObservation(new FlowKey("eni-a", "10.0.0.6", "10.0.0.5", 44249, 9090, 6, "ingress", "REJECT",
                         null, null), 1, 0, 2)), observations);
     }
+
+    private static String rejectSet(String elements) {
+        return "@@flow@@\n{\"nftables\": [{\"set\": {\"name\": \"fl_rej4\", \"elem\": [" + elements + "]}}]}\n@@flow@@\n";
+    }
+
+    private static String rejected(String sport, String dport, String protocol, long packets) {
+        return "{\"elem\": {\"val\": {\"concat\": [\"192.168.215.3\", " + sport + ", \"192.168.215.2\", " + dport
+                + ", \"" + protocol + "\"]}, \"counter\": {\"packets\": " + packets + ", \"bytes\": " + packets * 84 + "}}}";
+    }
+
+    /** Pings repeated across polls keep counting, whether the set holds one element or one per checksum. */
+    @Test
+    void repeatedRejectedPingsAreCountedOnEveryPoll() {
+        Map<String, long[]> first = new HashMap<>();
+        FlowCaptureService.observe(A, rejectSet(rejected("0", "0", "icmp", 3)), Map.of(), first, PEERS, null);
+        Map<String, long[]> second = new HashMap<>();
+
+        List<FlowObservation> later = FlowCaptureService.observe(A, rejectSet(rejected("0", "0", "icmp", 5) + ", "
+                + rejected("2048", "41000", "icmp", 1) + ", " + rejected("2048", "42000", "icmp", 1)),
+                first, second, PEERS, null);
+
+        FlowKey ping = new FlowKey("eni-a", "10.0.0.6", "10.0.0.5", 0, 0, 1, "ingress", "REJECT", null, null);
+        assertEquals(List.of(new FlowObservation(ping, 2, 168, 0), new FlowObservation(ping, 1, 84, 0),
+                new FlowObservation(ping, 1, 84, 0)), later);
+    }
+
+    /** Two ping sessions differ only by their ICMP id, and each keeps its own counters. */
+    @Test
+    void acceptedPingSessionsAreCountedApart() {
+        String sessions = "icmp     1 29 src=192.168.215.3 dst=192.168.215.2 type=8 code=0 id=7 packets=2 bytes=168 "
+                + "src=192.168.215.2 dst=192.168.215.3 type=0 code=0 id=7 packets=2 bytes=168 mark=0 use=1\n"
+                + "icmp     1 29 src=192.168.215.3 dst=192.168.215.2 type=8 code=0 id=9 packets=1 bytes=84 "
+                + "src=192.168.215.2 dst=192.168.215.3 type=0 code=0 id=9 packets=1 bytes=84 mark=0 use=1\n";
+        Map<String, long[]> first = new HashMap<>();
+
+        FlowCaptureService.observe(A, sessions, Map.of(), first, PEERS, null);
+
+        assertEquals(2, first.size());
+    }
+
+    /** Any smaller counter means a new entry with the same key, not negative traffic. */
+    @Test
+    void aShrinkingCounterIsAFreshEntry() {
+        Map<String, long[]> first = new HashMap<>();
+        FlowCaptureService.observe(A, rejectSet(rejected("44249", "9090", "tcp", 2)), Map.of(), first, PEERS, null);
+        first.values().forEach(counts -> counts[1] = 10_000);
+        Map<String, long[]> second = new HashMap<>();
+
+        List<FlowObservation> later = FlowCaptureService.observe(A, rejectSet(rejected("44249", "9090", "tcp", 3)),
+                first, second, PEERS, null);
+
+        assertEquals(List.of(new FlowObservation(new FlowKey("eni-a", "10.0.0.6", "10.0.0.5", 44249, 9090, 6,
+                "ingress", "REJECT", null, null), 3, 252, 2)), later);
+    }
 }

@@ -34,6 +34,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -350,5 +351,55 @@ class FlowLogServiceTest {
         assertTrue(flowLogService.s3Key(fl, T0).startsWith("AWSLogs/aws-account-id=000000000000/aws-service=vpcflowlogs/"
                 + "aws-region=us-east-1/year=2023/month=11/day=14/hour=22/000000000000_vpcflowlogs_us-east-1_fl-1_"
                 + "20231114T2213Z_"));
+    }
+
+    private static final String FORMAT = "${interface-id} ${packets} ${action} ${log-status}";
+
+    @Test
+    void rowsAFailedS3WriteCouldNotDeliverGoInTheNextFile() throws Exception {
+        S3Service s3Service = mock(S3Service.class);
+        when(s3Service.putObject(eq("bkt"), anyString(), any(byte[].class), anyString(), any(Map.class)))
+                .thenThrow(new RuntimeException("NoSuchBucket")).thenReturn(null);
+        FlowLogService service = observed(mock(Ec2Service.class), s3Service, mock(CloudWatchLogsService.class));
+        service.createFlowLog("us-east-1", "vpc-1", "VPC", "ALL", "s3", "arn:aws:s3:::bkt", null, FORMAT, 60);
+        List<FlowEni> enis = List.of(eni("eni-a", "vpc-1", Map.of()));
+        FlowKey key = new FlowKey("eni-a", "10.0.0.5", "10.0.0.6", 40000, 8080, 6, "egress", "ACCEPT", null, "1");
+
+        service.ingest(T0, enis, List.of());
+        service.ingest(T0.plusSeconds(10), enis, List.of(new FlowObservation(key, 3, 180, 2)));
+        service.ingest(T0.plusSeconds(60), enis, List.of());
+        service.ingest(T0.plusSeconds(70), enis, List.of());
+
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service, times(2)).putObject(eq("bkt"), anyString(), body.capture(),
+                anyString(), any(Map.class));
+        assertEquals(List.of(FORMAT.replaceAll("[${}]", ""), "eni-a 3 ACCEPT OK"),
+                List.of(gunzip(body.getAllValues().get(1)).split("\n")));
+    }
+
+    @Test
+    void shutdownDeliversTheOpenWindow() throws Exception {
+        S3Service s3Service = mock(S3Service.class);
+        FlowLogService service = observed(mock(Ec2Service.class), s3Service, mock(CloudWatchLogsService.class));
+        service.createFlowLog("us-east-1", "vpc-1", "VPC", "ALL", "s3", "arn:aws:s3:::bkt", null, FORMAT, 600);
+        List<FlowEni> enis = List.of(eni("eni-a", "vpc-1", Map.of()));
+        FlowKey key = new FlowKey("eni-a", "10.0.0.5", "10.0.0.6", 40000, 8080, 6, "egress", "ACCEPT", null, "1");
+        service.ingest(T0, enis, List.of());
+        service.ingest(T0.plusSeconds(10), enis, List.of(new FlowObservation(key, 3, 180, 2)));
+
+        service.flushOpenWindows(T0.plusSeconds(20));
+
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("bkt"), anyString(), body.capture(), anyString(), any(Map.class));
+        assertEquals("eni-a 3 ACCEPT OK", gunzip(body.getValue()).split("\n")[1]);
+    }
+
+    /** DescribeFlowLogs reports the group's ARN as LogDestination when only LogGroupName was given. */
+    @Test
+    void aLogGroupNameBecomesTheLogDestinationArn() {
+        FlowLog fl = flowLogService.createFlowLog("us-east-1", "vpc-123", "VPC", "ALL", "cloud-watch-logs", null,
+                "flows", "arn:aws:iam::000000000000:role/r", null, 600, null, false, false);
+
+        assertEquals("arn:aws:logs:us-east-1:000000000000:log-group:flows", fl.getLogDestination());
     }
 }

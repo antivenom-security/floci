@@ -123,14 +123,17 @@ public class SecurityGroupFirewallManager {
                 .withHostDockerInternalOnLinux()
                 .withEntrypoint(List.of("sh", "-c"))
                 .withCmd(List.of("exec sleep 2147483647"))
-                // Flow logs read per-connection packet and byte counts from conntrack here.
-                .withSysctl("net.netfilter.nf_conntrack_acct", "1")
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region))
                 .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true",
                         ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
                 .withLabels(extraLabels);
         if (portBindings != null) {
             portBindings.forEach(builder::withPortBinding);
+        }
+        if ("observed".equals(FlowLogService.resolveMode(config))) {
+            // Observed flow logs read per-connection packet and byte counts from conntrack here. Only
+            // then, since the sysctl fails container creation where nf_conntrack is not loaded.
+            builder.withSysctl("net.netfilter.nf_conntrack_acct", "1");
         }
         ContainerSpec spec = builder.build();
         String helperId = null;

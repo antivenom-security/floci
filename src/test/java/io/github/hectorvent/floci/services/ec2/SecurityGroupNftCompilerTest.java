@@ -52,6 +52,7 @@ class SecurityGroupNftCompilerTest {
 
         assertTrue(nft.contains("update @fl_rej4 { ip saddr . th sport . ip daddr . th dport . meta l4proto counter }"));
         assertTrue(nft.contains("update @fl_rej6 { ip6 saddr . th sport . ip6 daddr . th dport . meta l4proto counter }"));
+        assertTrue(nft.contains("meta l4proto != { tcp, udp } update @fl_rej4 { ip saddr . 0 . ip daddr . 0 . meta l4proto counter }"));
         assertTrue(nft.endsWith("add rule inet floci_sg egress jump fl_reject\n"));
         assertTrue(nft.contains("add rule inet floci_sg ingress jump fl_reject\n"));
     }

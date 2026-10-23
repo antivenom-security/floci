@@ -27,6 +27,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -60,6 +61,7 @@ public class FlowCaptureService {
     private final EmbeddedDnsServer dnsServer;
     private final int tickSeconds;
     private final Map<String, Map<String, long[]>> counters = new HashMap<>();
+    private final Set<String> needsBaseline = new HashSet<>();
     private ScheduledExecutorService scheduler;
 
     @Inject
@@ -109,7 +111,13 @@ public class FlowCaptureService {
             Set<String> live = new HashSet<>();
             for (SecurityGroupFirewallManager.ProtectedEndpoint pe : managed) {
                 live.add(pe.helperId());
-                enis.add(describe(pe.endpoint()));
+                FlowEni eni = describe(pe.endpoint());
+                enis.add(eni);
+                if (!flowLogService.observes(eni)) {
+                    counters.remove(pe.helperId());
+                    needsBaseline.add(pe.helperId());
+                    continue;
+                }
                 ContainerExec.Result poll;
                 try {
                     poll = ContainerExec.run(dockerClient, pe.helperId(), new String[]{"sh", "-c", POLL}, 10);
@@ -122,11 +130,16 @@ public class FlowCaptureService {
                     continue;
                 }
                 Map<String, long[]> next = new HashMap<>();
-                observations.addAll(observe(pe.endpoint(), poll.stdout(),
-                        counters.getOrDefault(pe.helperId(), Map.of()), next, peers, flociAddress));
+                List<FlowObservation> seen = observe(pe.endpoint(), poll.stdout(),
+                        counters.getOrDefault(pe.helperId(), Map.of()), next, peers, flociAddress);
                 counters.put(pe.helperId(), next);
+                // Counters accumulated while no flow log covered the ENI are history, not this tick.
+                if (!needsBaseline.remove(pe.helperId())) {
+                    observations.addAll(seen);
+                }
             }
             counters.keySet().retainAll(live);
+            needsBaseline.retainAll(live);
             flowLogService.ingest(now, enis, observations);
         } catch (RuntimeException e) {
             LOG.warnv(e, "Flow capture tick failed");
@@ -238,7 +251,7 @@ public class FlowCaptureService {
                 }
                 String key = word.substring(0, eq);
                 if ("src".equals(key)) {
-                    tuples.add(new HashMap<>());
+                    tuples.add(new LinkedHashMap<>());
                 }
                 if (!tuples.isEmpty()) {
                     tuples.getLast().putIfAbsent(key, word.substring(eq + 1));
@@ -264,9 +277,14 @@ public class FlowCaptureService {
             }
             long[] counts = {number(orig.get("packets")), number(orig.get("bytes")),
                     number(reply.get("packets")), number(reply.get("bytes"))};
-            String key = "ct " + protocol + " " + src + " " + sport + " " + dst + " " + dport;
-            long[] delta = delta(key, counts);
-            boolean fresh = !previous.containsKey(key);
+            StringBuilder key = new StringBuilder("ct ").append(protocol);
+            orig.forEach((name, value) -> {
+                if (!"packets".equals(name) && !"bytes".equals(name)) {
+                    key.append(' ').append(name).append('=').append(value);
+                }
+            });
+            long[] delta = delta(key.toString(), counts);
+            boolean fresh = !previous.containsKey(key.toString());
             int closing = protocol == 6 && CLOSING.contains(state) ? 1 : 0;
             int originFlags = protocol == 6 ? (fresh ? 2 : 0) | closing : 0;
             int replyFlags = protocol == 6 ? (fresh ? 18 : 0) | closing : 0;
@@ -309,7 +327,8 @@ public class FlowCaptureService {
                     if (excluded(peer, protocol, sport, dport)) {
                         continue;
                     }
-                    String key = "rj " + protocol + " " + src + " " + sport + " " + dst + " " + dport;
+                    String key = "rj " + protocol + " " + src + " " + tuple.get(1).asText() + " " + dst + " "
+                            + tuple.get(3).asText();
                     long[] delta = delta(key, new long[]{elem.path("counter").path("packets").asLong(),
                             elem.path("counter").path("bytes").asLong()});
                     emit(egress ? "egress" : "ingress", src, dst, sport, dport, protocol,
@@ -318,15 +337,18 @@ public class FlowCaptureService {
             }
         }
 
-        /** Counters only grow, so a smaller one means the entry expired and came back. */
+        /** Counters only grow, so any smaller one means the entry expired and came back. */
         private long[] delta(String key, long[] counts) {
             next.put(key, counts);
             long[] before = previous.get(key);
-            if (before == null || counts[0] < before[0]) {
+            if (before == null) {
                 return counts;
             }
             long[] delta = new long[counts.length];
             for (int i = 0; i < counts.length; i++) {
+                if (counts[i] < before[i]) {
+                    return counts;
+                }
                 delta[i] = counts[i] - before[i];
             }
             return delta;

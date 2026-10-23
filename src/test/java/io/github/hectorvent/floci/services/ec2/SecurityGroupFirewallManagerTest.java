@@ -34,7 +34,24 @@ class SecurityGroupFirewallManagerTest {
 
     @Test
     void helperCarriesTheResolverAndHostsItsWorkloadsUse() {
+        ContainerSpec helper = helperSpec(Optional.empty());
+
+        assertTrue(helper.dnsServers().contains("172.18.0.2"), "the helper uses Floci's DNS");
+        assertTrue(helper.extraHosts().contains("host.docker.internal:host-gateway"),
+                "the helper resolves host.docker.internal");
+        assertEquals(Map.of("net.netfilter.nf_conntrack_acct", "1"), helper.linuxOptions().sysctls(),
+                "observed flow logs, the default with enforcement on, need conntrack accounting");
+    }
+
+    /** The sysctl fails container creation where nf_conntrack is not loaded, so only flow logs ask for it. */
+    @Test
+    void helperSetsNoSysctlUnlessFlowLogsAreObserved() {
+        assertEquals(Map.of(), helperSpec(Optional.of("synthetic")).linuxOptions().sysctls());
+    }
+
+    private static ContainerSpec helperSpec(Optional<String> flowLogsMode) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ec2().flowLogs().mode()).thenReturn(flowLogsMode);
         when(config.network().securityGroupEnforcement().enabled()).thenReturn(true);
         when(config.network().securityGroupEnforcement().helperImage()).thenReturn("floci/network-helper:local");
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
@@ -59,9 +76,7 @@ class SecurityGroupFirewallManagerTest {
 
         ArgumentCaptor<ContainerSpec> helper = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).createAndStart(helper.capture());
-        assertTrue(helper.getValue().dnsServers().contains("172.18.0.2"), "the helper uses Floci's DNS");
-        assertTrue(helper.getValue().extraHosts().contains("host.docker.internal:host-gateway"),
-                "the helper resolves host.docker.internal");
+        return helper.getValue();
     }
 
     @Test
