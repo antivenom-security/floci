@@ -1247,6 +1247,10 @@ public interface EmulatorConfig {
         /** Record the first X-Forwarded-For address as sourceIPAddress instead of the TCP peer. */
         @WithDefault("false")
         boolean trustForwardedFor();
+
+        /** Seconds before a covered event reaches EventBridge; AWS documents no delay. */
+        @WithDefault("0")
+        int eventbridgeDelaySeconds();
     }
 
     interface CloudTrailManagementEventsConfig {

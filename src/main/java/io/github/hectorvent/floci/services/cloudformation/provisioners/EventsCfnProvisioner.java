@@ -144,8 +144,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             eventPattern = patternNode.toString();
         }
 
-        String stateStr = ctx.resolveOptional(props, "State");
-        RuleState state = "DISABLED".equals(stateStr) ? RuleState.DISABLED : RuleState.ENABLED;
+        RuleState state = RuleState.fromValue(ctx.resolveOptional(props, "State"));
 
         // Read before the rule exists, as CloudFormation refuses a target of the wrong type before it
         // touches the rule.

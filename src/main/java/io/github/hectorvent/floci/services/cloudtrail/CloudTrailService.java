@@ -60,6 +60,7 @@ public class CloudTrailService {
     private final UserIdentityBuilder userIdentityBuilder;
     private final ServiceCallAuthorizer serviceCallAuthorizer;
     private volatile Runnable bufferFullListener = () -> { };
+    private final CloudTrailEventBridgeForwarder eventBridge;
 
     /** Per-trail pending record buffers: ephemeral, never persisted. */
     private final ConcurrentHashMap<PendingTrailKey, PendingRecordBuffer> pendingRecordsByTrail =
@@ -75,21 +76,22 @@ public class CloudTrailService {
     private final ConcurrentHashMap<String, Object> trailLocks = new ConcurrentHashMap<>();
 
     CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
-                      IamService iamService, ObjectMapper mapper) {
+                      IamService iamService, ObjectMapper mapper, CloudTrailEventBridgeForwarder eventBridge) {
         this(storageFactory, regionResolver, mapper, new CloudTrailRecordBuilder(mapper),
-                new UserIdentityBuilder(iamService, regionResolver, mapper), null);
+                new UserIdentityBuilder(iamService, regionResolver, mapper), eventBridge, null);
     }
 
     @Inject
     public CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver, ObjectMapper mapper,
                              CloudTrailRecordBuilder recordBuilder, UserIdentityBuilder userIdentityBuilder,
-                             ServiceCallAuthorizer serviceCallAuthorizer) {
+                             CloudTrailEventBridgeForwarder eventBridge, ServiceCallAuthorizer serviceCallAuthorizer) {
         this.store = storageFactory.create("cloudtrail", "cloudtrail-trails.json",
                 new TypeReference<Map<String, CloudTrailEntry>>() {});
         this.regionResolver = regionResolver;
         this.mapper = mapper;
         this.recordBuilder = recordBuilder;
         this.userIdentityBuilder = userIdentityBuilder;
+        this.eventBridge = eventBridge;
         this.serviceCallAuthorizer = serviceCallAuthorizer;
     }
 
@@ -484,6 +486,7 @@ public class CloudTrailService {
                 return;
             }
             ObjectNode record = buildS3Record(in, region, accountId);
+            eventBridge.forward(record);
             for (MatchedTrail mt : matched) {
                 ObjectNode copy = record.deepCopy();
                 boolean accepted = append(new TrailKey(accountId, mt.region(), mt.trail().name(), region), copy);
@@ -503,14 +506,15 @@ public class CloudTrailService {
 
     /**
      * Appends a management event record to every logging trail of its recipient account whose region,
-     * global-service setting and selectors cover it.
+     * global-service setting and selectors cover it, returning whether any trail did.
      */
-    public void routeManagementEvent(ObjectNode record) {
+    public boolean routeManagementEvent(ObjectNode record) {
         String accountId = record.path("recipientAccountId").asText();
         String eventRegion = record.path("awsRegion").asText();
         String eventSource = record.path("eventSource").asText();
         boolean readOnly = record.path("readOnly").asBoolean();
         boolean global = TrailRouter.globalSigningRegion(eventSource, eventRegion) != null;
+        boolean covered = false;
         for (AccountAwareStorageBackend.AccountEntry<CloudTrailEntry> stored : store.scanAllAccountEntries(k -> true)) {
             CloudTrailEntry entry = stored.value();
             String trailRegion = regionFromKey(stored.key());
@@ -521,11 +525,13 @@ public class CloudTrailService {
                     eventSource, readOnly)) {
                 continue;
             }
+            covered = true;
             if (!append(new TrailKey(accountId, trailRegion, entry.trail().name(), eventRegion), record.deepCopy())) {
                 LOG.debugv("Dropped CloudTrail event {0} for trail {1}: delivery is failing and the buffer is full",
                         record.path("eventName").asText(), entry.trail().name());
             }
         }
+        return covered;
     }
 
     public void requeueRecords(TrailKey key, List<ObjectNode> records) {

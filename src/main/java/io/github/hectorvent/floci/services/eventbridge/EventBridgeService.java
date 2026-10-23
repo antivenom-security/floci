@@ -59,6 +59,8 @@ public class EventBridgeService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
     private static final List<String> REQUIRED_ENTRY_FIELDS = List.of("Source", "DetailType", "Detail");
+    /** Entry key marking a read-only CloudTrail management event, which plain ENABLED rules never match. */
+    public static final String CLOUDTRAIL_READ_ONLY_MANAGEMENT_EVENT = "CloudTrailReadOnlyManagementEvent";
 
     private final StorageBackend<String, EventBus> busStore;
     private final StorageBackend<String, Rule> ruleStore;
@@ -866,7 +868,8 @@ public class EventBridgeService implements ResourceProvider {
             List<Rule> candidateRules = accountScan(ruleStore, accountId, k -> k.startsWith(rulePrefix));
 
             for (Rule rule : candidateRules) {
-                if (rule.getState() != RuleState.ENABLED) {
+                if (rule.getState() == RuleState.DISABLED || (rule.getState() == RuleState.ENABLED
+                        && entry.containsKey(CLOUDTRAIL_READ_ONLY_MANAGEMENT_EVENT))) {
                     continue;
                 }
                 // A rule without an event pattern is a schedule rule: it never matches put events.
@@ -2005,7 +2008,7 @@ public class EventBridgeService implements ResourceProvider {
 
     private void startSchedulerIfNeeded(Rule rule) {
         if (ruleScheduler != null
-                && rule.getState() == RuleState.ENABLED
+                && rule.getState() != RuleState.DISABLED
                 && rule.getScheduleExpression() != null
                 && !rule.getScheduleExpression().isBlank()) {
             String region = rule.getRegion() != null ? rule.getRegion() : regionResolver.getDefaultRegion();

@@ -127,6 +127,17 @@ Basic selectors honor `IncludeManagementEvents`, `ReadWriteType` and
 `NextToken`, and answers `ThrottlingException` past
 `lookup-rate-limit-per-second` calls per second per account and region.
 
+### EventBridge
+
+A management or S3 data event that a logging trail covers also goes to the
+default event bus of its record's region (`us-east-1` for global services),
+as `AWS API Call via CloudTrail` (or `AWS Service Event via CloudTrail`) with
+`source` `aws.<service>`, `resources` `[]` and the record as `detail`. Write
+management events and data events match `ENABLED` rules. Read-only management
+events match only rules in state `ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS`.
+Records over 256 KB are not sent. `eventbridge-delay-seconds` holds events back
+before they are sent; AWS documents no delay, so the default is 0.
+
 Known gaps:
 
 - Unsigned calls (for example `AssumeRoleWithWebIdentity`) are not recorded.
@@ -174,6 +185,7 @@ recorded as `PostObject` when IAM refuses it.
 | `FLOCI_SERVICES_CLOUDTRAIL_EVENT_HISTORY_MAX_EVENTS` | `20000` | Event history size, across accounts and regions; the oldest events are evicted past it |
 | `FLOCI_SERVICES_CLOUDTRAIL_LOOKUP_RATE_LIMIT_PER_SECOND` | `2` | `LookupEvents` calls allowed per second per account and region |
 | `FLOCI_SERVICES_CLOUDTRAIL_TRUST_FORWARDED_FOR` | `false` | Record the first `X-Forwarded-For` address as `sourceIPAddress` instead of the TCP peer |
+| `FLOCI_SERVICES_CLOUDTRAIL_EVENTBRIDGE_DELAY_SECONDS` | `0` | Seconds before a covered event reaches EventBridge |
 
 ## Example
 

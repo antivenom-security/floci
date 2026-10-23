@@ -911,6 +911,7 @@ floci:
         max-events: 20000
       lookup-rate-limit-per-second: 2
       trust-forwarded-for: false
+      eventbridge-delay-seconds: 0
     lightsail:
       enabled: true
     cloudcontrol:

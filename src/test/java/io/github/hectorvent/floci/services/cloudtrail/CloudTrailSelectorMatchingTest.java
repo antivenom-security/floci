@@ -189,7 +189,7 @@ class CloudTrailSelectorMatchingTest {
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory(ACCOUNT));
         CloudTrailService service = new CloudTrailService(storageFactory, new RegionResolver(REGION, ACCOUNT),
-                mock(IamService.class), new ObjectMapper());
+                mock(IamService.class), new ObjectMapper(), mock(CloudTrailEventBridgeForwarder.class));
         service.createTrail(REGION, "reads", "trail-logs", null, null, true, false, false, false);
         service.putEventSelectors(REGION, "reads", List.of(new EventSelector("ReadOnly", false,
                 List.of(new DataResource("AWS::S3::Object", List.of("arn:aws:s3:::source/"))), null)));
