@@ -449,6 +449,7 @@ floci:
     cloudtrail:
       enabled: true
       flush-interval-seconds: 3600
+      digest-interval-seconds: 3600
       management-events:
         enabled: true
       event-history:

@@ -9,6 +9,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
@@ -17,6 +18,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPInputStream;
@@ -196,36 +199,124 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
     }
 
     @Test
-    void retryBudgetIncludesRecordsInFlightAcrossEventRegions() {
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
+    void fiveThousandEventsInOneIntervalWhileDeliveriesRunAreAllDelivered() throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
-        String sourceBucket = "in-flight-source-" + suffix;
-        String destinationBucket = "in-flight-logs-" + suffix;
-        String trailName = "in-flight-trail-" + suffix;
+        String sourceBucket = "no-drop-source-" + suffix;
+        String destinationBucket = "no-drop-logs-" + suffix;
+        String trailName = "no-drop-trail-" + suffix;
+        int producers = 4;
+        int perProducer = 1250;
 
         createBucket(sourceBucket);
-        createTrail(trailName, destinationBucket, true);
+        createBucket(destinationBucket);
+        createTrail(trailName, destinationBucket);
         selectSourceBucket(trailName, sourceBucket);
         startLogging(trailName);
 
-        emitEvents(sourceBucket, "us-east-1", RETRY_RECORD_LIMIT, "east");
-        CloudTrailService.TrailKey eastKey =
-                new CloudTrailService.TrailKey("us-east-1", trailName, "us-east-1");
-        List<ObjectNode> inFlight = cloudTrailService.drainPendingRecords(eastKey);
+        AtomicBoolean producing = new AtomicBoolean(true);
+        Thread flusher = new Thread(() -> {
+            while (producing.get()) {
+                writer.flushNow();
+            }
+        });
+        flusher.start();
+        List<Thread> threads = new ArrayList<>();
+        for (int p = 0; p < producers; p++) {
+            int first = p * perProducer;
+            Thread producer = new Thread(() -> {
+                for (int i = first; i < first + perProducer; i++) {
+                    cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
+                            .region("us-east-1")
+                            .eventName("PutObject")
+                            .bucketName(sourceBucket)
+                            .key(eventKey(i))
+                            .eventTimeMillis(System.currentTimeMillis())
+                            .build());
+                }
+            });
+            threads.add(producer);
+            producer.start();
+        }
+        for (Thread producer : threads) {
+            producer.join();
+        }
+        producing.set(false);
+        flusher.join();
+        writer.flushNow();
 
-        emitEvents(sourceBucket, "us-west-2", 80, "west");
-        cloudTrailService.requeueRecords(eastKey, inFlight);
+        Set<String> deliveredKeys = new HashSet<>();
+        for (JsonNode record : deliveredRecords(destinationBucket)) {
+            deliveredKeys.add(record.path("requestParameters").path("key").asText());
+        }
+        assertEquals(producers * perProducer, deliveredKeys.size());
+    }
 
-        List<ObjectNode> retainedEast = cloudTrailService.drainPendingRecords(eastKey);
-        List<ObjectNode> retainedWest = cloudTrailService.drainPendingRecords(
-                new CloudTrailService.TrailKey("us-east-1", trailName, "us-west-2"));
+    @Test
+    @Timeout(value = 2, unit = TimeUnit.MINUTES)
+    void fullBufferIsDeliveredBeforeTheInterval() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "early-source-" + suffix;
+        String destinationBucket = "early-logs-" + suffix;
+        String trailName = "early-trail-" + suffix;
 
-        assertEquals(RETRY_RECORD_LIMIT, retainedEast.size(),
-                "in-flight records must reserve the trail-wide retry budget");
-        assertTrue(retainedWest.isEmpty(),
-                "events from another region must not displace older in-flight records");
-        for (int i = 0; i < RETRY_RECORD_LIMIT; i++) {
-            assertEquals("east/" + eventKey(i),
-                    retainedEast.get(i).path("requestParameters").path("key").asText());
+        createBucket(sourceBucket);
+        createBucket(destinationBucket);
+        createTrail(trailName, destinationBucket);
+        selectSourceBucket(trailName, sourceBucket);
+        startLogging(trailName);
+        emitEvents(sourceBucket, "us-east-1", RETRY_RECORD_LIMIT + 1, "early");
+
+        long deadline = System.currentTimeMillis() + 60_000;
+        while (deliveredRecords(destinationBucket).size() < RETRY_RECORD_LIMIT
+                && System.currentTimeMillis() < deadline) {
+            Thread.sleep(200);
+        }
+        assertTrue(deliveredRecords(destinationBucket).size() >= RETRY_RECORD_LIMIT,
+                "a full buffer must be delivered without waiting for the hourly test interval");
+    }
+
+    @Test
+    @Timeout(value = 3, unit = TimeUnit.MINUTES)
+    void logFilesSplitAtFiftyMegabytes() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceBucket = "split-source-" + suffix;
+        String destinationBucket = "split-logs-" + suffix;
+        String trailName = "split-trail-" + suffix;
+        int events = 520;
+
+        createBucket(sourceBucket);
+        createBucket(destinationBucket);
+        createTrail(trailName, destinationBucket);
+        selectSourceBucket(trailName, sourceBucket);
+        startLogging(trailName);
+        String padding = "/" + "x".repeat(60_000);
+        for (int i = 0; i < events; i++) {
+            cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()
+                    .region("us-east-1")
+                    .eventName("PutObject")
+                    .bucketName(sourceBucket)
+                    .key(eventKey(i) + padding)
+                    .eventTimeMillis(System.currentTimeMillis())
+                    .build());
+        }
+        writer.flushNow();
+
+        List<String> files = listLogKeys(destinationBucket);
+        assertTrue(files.size() >= 2, "over 50 MB of records must not fit one file: " + files);
+        int delivered = 0;
+        for (String file : files) {
+            byte[] json = gunzip(given().when().get("/" + destinationBucket + "/" + file)
+                    .then().statusCode(200).extract().asByteArray());
+            assertTrue(json.length <= CloudTrailService.MAX_LOG_FILE_BYTES, file + " is " + json.length + " bytes");
+            delivered += new ObjectMapper().readTree(json).path("Records").size();
+        }
+        assertEquals(events, delivered);
+    }
+
+    private static byte[] gunzip(byte[] gz) throws Exception {
+        try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(gz))) {
+            return in.readAllBytes();
         }
     }
 

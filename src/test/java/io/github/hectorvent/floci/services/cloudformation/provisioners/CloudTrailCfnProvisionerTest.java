@@ -151,7 +151,7 @@ class CloudTrailCfnProvisionerTest {
 
     private Trail trail(String name, String arn) {
         return new Trail(name, arn, "dest-bucket", null, null, true, false,
-                "us-east-1", false, false, false, false);
+                "us-east-1", false, false, false, false, null, null);
     }
 
     private ProvisionContext context() {

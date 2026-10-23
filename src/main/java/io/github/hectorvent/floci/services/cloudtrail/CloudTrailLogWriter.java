@@ -1,14 +1,19 @@
 package io.github.hectorvent.floci.services.cloudtrail;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.cloudtrail.model.Trail;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
@@ -18,7 +23,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -29,6 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.zip.GZIPOutputStream;
 
@@ -39,11 +46,12 @@ import java.util.zip.GZIPOutputStream;
  *
  * <pre>{@code
  * ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/
- *   ${accountId}_CloudTrail_${region}_${YYYYMMDDTHHMMZ}_${rand12}.json.gz
+ *   ${accountId}_CloudTrail_${region}_${YYYYMMDDTHHMMZ}_${rand16}.json.gz
  * }</pre>
  *
- * Real CloudTrail delivers logs with ~5 minute latency. The flush cadence
- * here is configurable so local dev / CI loops stay fast.
+ * Each delivered file is then sent record by record to the trail's CloudWatch Logs
+ * group, announced on its SNS topic and handed to {@link CloudTrailDigestWriter}.
+ * The cadence defaults to AWS's five minutes; a full buffer delivers early.
  */
 @Startup
 @ApplicationScoped
@@ -62,7 +70,12 @@ public class CloudTrailLogWriter {
     private final S3Service s3Service;
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
+    private final CloudTrailDigestWriter digestWriter;
+    private final CloudTrailCwlDelivery cwlDelivery;
+    private final SnsService snsService;
+    private final ServiceCallAuthorizer serviceCallAuthorizer;
     private final SecureRandom rng = new SecureRandom();
+    private final AtomicBoolean earlyFlushQueued = new AtomicBoolean();
     private final ConcurrentHashMap<CloudTrailService.TrailKey, FlushLock> flushLocks = new ConcurrentHashMap<>();
 
     private ScheduledExecutorService executor;
@@ -72,12 +85,20 @@ public class CloudTrailLogWriter {
                                CloudTrailService cloudTrailService,
                                S3Service s3Service,
                                RegionResolver regionResolver,
-                               ObjectMapper mapper) {
+                               ObjectMapper mapper,
+                               CloudTrailDigestWriter digestWriter,
+                               CloudTrailCwlDelivery cwlDelivery,
+                               SnsService snsService,
+                               ServiceCallAuthorizer serviceCallAuthorizer) {
         this.config = config;
         this.cloudTrailService = cloudTrailService;
         this.s3Service = s3Service;
         this.regionResolver = regionResolver;
         this.mapper = mapper;
+        this.digestWriter = digestWriter;
+        this.cwlDelivery = cwlDelivery;
+        this.snsService = snsService;
+        this.serviceCallAuthorizer = serviceCallAuthorizer;
     }
 
     @PostConstruct
@@ -92,6 +113,7 @@ public class CloudTrailLogWriter {
             return t;
         });
         executor.scheduleAtFixedRate(this::flushAll, interval, interval, TimeUnit.SECONDS);
+        cloudTrailService.onBufferFull(this::requestEarlyFlush);
         LOG.infov("CloudTrail log writer started (flushIntervalSeconds={0})", interval);
     }
 
@@ -112,7 +134,15 @@ public class CloudTrailLogWriter {
         flushAll();
     }
 
+    private void requestEarlyFlush() {
+        ScheduledExecutorService current = executor;
+        if (current != null && earlyFlushQueued.compareAndSet(false, true)) {
+            current.execute(this::flushAll);
+        }
+    }
+
     private void flushAll() {
+        earlyFlushQueued.set(false);
         try {
             for (CloudTrailService.TrailKey key : cloudTrailService.trailsWithPendingRecords()) {
                 try {
@@ -173,11 +203,13 @@ public class CloudTrailLogWriter {
             return 0;
         }
 
+        byte[] json;
         byte[] payload;
         String objectKey;
+        String accountId = regionResolver.getAccountId();
         try {
-            payload = serializeAndGzip(records);
-            String accountId = regionResolver.getAccountId();
+            json = serialize(records);
+            payload = gzip(json);
             // Use the event region for the S3 delivery path so multi-region trail
             // events from us-west-2 land under CloudTrail/us-west-2, not the trail's home region.
             objectKey = buildObjectKey(trail, accountId, key.eventRegion());
@@ -203,6 +235,15 @@ public class CloudTrailLogWriter {
             LOG.warnv(e, "CloudTrail delivery success status update failed for trail {0}", key.trailName());
         }
         cloudTrailService.completeDelivery(key);
+        if (trail.logFileValidationEnabled()) {
+            digestWriter.logDelivered(key, trail.s3BucketName(), objectKey, json, records);
+        }
+        if (trail.cloudWatchLogsLogGroupArn() != null) {
+            deliverToCloudWatchLogs(key, trail, accountId, records);
+        }
+        if (trail.snsTopicArn() != null) {
+            notifySns(key, trail, accountId, objectKey);
+        }
 
         // The write above already succeeded and durably delivered the records:
         // from here on, records must never be re-queued. Doing so on a failure
@@ -232,6 +273,41 @@ public class CloudTrailLogWriter {
         return records.size();
     }
 
+    private void deliverToCloudWatchLogs(CloudTrailService.TrailKey key, Trail trail, String accountId,
+                                         List<ObjectNode> records) {
+        try {
+            cwlDelivery.deliver(trail, accountId, key.eventRegion(), records);
+            long now = System.currentTimeMillis();
+            cloudTrailService.updateChannels(key.region(), key.trailName(), c -> c.cloudWatchLogs(now, null));
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "CloudTrail delivery to CloudWatch Logs failed for trail {0}", key.trailName());
+            String error = deliveryError(e);
+            cloudTrailService.updateChannels(key.region(), key.trailName(),
+                    c -> c.cloudWatchLogs(c.cloudWatchLogsDeliveryTime(), error));
+        }
+    }
+
+    private void notifySns(CloudTrailService.TrailKey key, Trail trail, String accountId, String objectKey) {
+        try {
+            if (serviceCallAuthorizer.authorize("cloudtrail", "sns:Publish", trail.snsTopicArn(),
+                    trail.trailArn(), accountId) != IamPolicyEvaluator.Decision.ALLOW) {
+                throw new AwsException("AuthorizationError",
+                        "CloudTrail is not authorized to publish to " + trail.snsTopicArn(), 403);
+            }
+            ObjectNode message = mapper.createObjectNode().put("s3Bucket", trail.s3BucketName());
+            message.putArray("s3ObjectKey").add(objectKey);
+            snsService.publish(trail.snsTopicArn(), null, mapper.writeValueAsString(message), null,
+                    AwsArnUtils.regionOrDefault(trail.snsTopicArn(), trail.homeRegion()));
+            long now = System.currentTimeMillis();
+            cloudTrailService.updateChannels(key.region(), key.trailName(), c -> c.notification(now, null));
+        } catch (JsonProcessingException | RuntimeException e) {
+            LOG.warnv(e, "CloudTrail SNS notification failed for trail {0}", key.trailName());
+            String error = e instanceof RuntimeException runtime ? deliveryError(runtime) : e.getMessage();
+            cloudTrailService.updateChannels(key.region(), key.trailName(),
+                    c -> c.notification(c.notificationTime(), error));
+        }
+    }
+
     private String deliveryError(RuntimeException e) {
         String message = e.getMessage() == null ? "" : ": " + e.getMessage();
         if (e instanceof AwsException awsException) {
@@ -240,28 +316,32 @@ public class CloudTrailLogWriter {
         return e.getClass().getSimpleName() + message;
     }
 
-    private byte[] serializeAndGzip(List<ObjectNode> records) {
+    private byte[] serialize(List<ObjectNode> records) {
         ObjectNode envelope = mapper.createObjectNode();
         ArrayNode arr = envelope.putArray("Records");
         for (ObjectNode r : records) {
             arr.add(r);
         }
         try {
-            byte[] json = mapper.writeValueAsBytes(envelope);
-            ByteArrayOutputStream baos = new ByteArrayOutputStream(Math.max(64, json.length / 4));
-            try (GZIPOutputStream gz = new GZIPOutputStream(baos)) {
-                gz.write(json);
-            }
-            return baos.toByteArray();
+            return mapper.writeValueAsBytes(envelope);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize CloudTrail records", e);
         }
     }
 
+    static byte[] gzip(byte[] json) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(Math.max(64, json.length / 4));
+        try (GZIPOutputStream gz = new GZIPOutputStream(baos)) {
+            gz.write(json);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to gzip a CloudTrail file", e);
+        }
+        return baos.toByteArray();
+    }
+
     private String buildObjectKey(Trail trail, String accountId, String region) {
         LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
-        String prefix = trail.s3KeyPrefix() == null || trail.s3KeyPrefix().isEmpty()
-                ? "" : trail.s3KeyPrefix() + (trail.s3KeyPrefix().endsWith("/") ? "" : "/");
+        String prefix = CloudTrailService.keyPrefix(trail.s3KeyPrefix());
         String datePath = PATH_DATE.format(now);
         String fileTs = FILE_TS.format(now);
         String rand = randomFilenameSuffix(16);

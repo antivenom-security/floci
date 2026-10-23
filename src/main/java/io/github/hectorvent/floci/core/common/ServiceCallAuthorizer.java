@@ -10,6 +10,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -59,6 +60,12 @@ public class ServiceCallAuthorizer {
      */
     public Decision authorize(String service, String action, String resourceArn,
                               String sourceArn, String sourceAccount) {
+        return authorize(service, action, resourceArn, sourceArn, sourceAccount, Map.of());
+    }
+
+    /** Like {@link #authorize(String, String, String, String, String)}, with the request's own condition keys, such as {@code s3:x-amz-acl}. */
+    public Decision authorize(String service, String action, String resourceArn,
+                              String sourceArn, String sourceAccount, Map<String, List<String>> requestContext) {
         if (!config.services().iam().enforcementEnabled()) {
             return Decision.ALLOW;
         }
@@ -71,8 +78,9 @@ public class ServiceCallAuthorizer {
                 .map(ResourcePolicyProvider.ResourcePolicy::policyDocument)
                 .filter(document -> document != null && !document.isBlank())
                 .toList();
-        Map<String, List<String>> context = IamConditionContextResolver.serviceCallContext(
-                servicePrincipal, resourceArn, ownerAccountId, sourceArn, sourceAccount);
+        Map<String, List<String>> context = new LinkedHashMap<>(IamConditionContextResolver.serviceCallContext(
+                servicePrincipal, resourceArn, ownerAccountId, sourceArn, sourceAccount));
+        context.putAll(requestContext);
         Decision decision = evaluator.evaluateServicePrincipal(
                 documents.isEmpty() ? null : documents, servicePrincipal, action, resourceArn, context);
         if (decision == Decision.DENY) {

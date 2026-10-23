@@ -167,7 +167,7 @@ class CloudTrailLogWriterBatchingIntegrationTest {
         Deque<ObjectNode> pending = records(2);
         Trail trail = new Trail(trailName,
                 "arn:aws:cloudtrail:" + region + ":000000000000:trail/" + trailName,
-                bucket, null, null, true, false, region, false, false, false, false);
+                bucket, null, null, true, false, region, false, false, false, false, null, null);
         CountDownLatch firstDrainEntered = new CountDownLatch(1);
         CountDownLatch releaseFirstDrain = new CountDownLatch(1);
         CountDownLatch secondDrainEntered = new CountDownLatch(1);
@@ -222,7 +222,7 @@ class CloudTrailLogWriterBatchingIntegrationTest {
                                               Deque<ObjectNode> pending) {
         Trail trail = new Trail(trailName,
                 "arn:aws:cloudtrail:" + region + ":000000000000:trail/" + trailName,
-                bucket, null, null, true, false, region, false, false, false, false);
+                bucket, null, null, true, false, region, false, false, false, false, null, null);
 
         CloudTrailService mockService = mock(CloudTrailService.class);
         when(mockService.trailsWithPendingRecords())

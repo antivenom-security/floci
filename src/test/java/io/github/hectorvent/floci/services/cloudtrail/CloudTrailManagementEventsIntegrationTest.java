@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -65,6 +66,9 @@ class CloudTrailManagementEventsIntegrationTest {
 
     @Inject
     CloudTrailService trails;
+
+    @Inject
+    S3Service s3;
 
     @Inject
     EcsTaskRoleCredentials ecsTaskRoleCredentials;
@@ -192,7 +196,10 @@ class CloudTrailManagementEventsIntegrationTest {
                      .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
                      .httpClient(UrlConnectionHttpClient.create()).build();
              IamClient iam = iam(AwsBasicCredentials.create("test", "test"))) {
-            cloudTrail.createTrail(r -> r.name(trailName).s3BucketName("trail-bucket-" + suffix()));
+            String bucket = "trail-bucket-" + suffix();
+            s3.createBucket(bucket, "us-east-1");
+            s3.putBucketPolicy(bucket, cloudTrailBucketPolicy(bucket));
+            cloudTrail.createTrail(r -> r.name(trailName).s3BucketName(bucket));
             cloudTrail.putEventSelectors(r -> r.trailName(trailName).eventSelectors(s -> s
                     .readWriteType("All").includeManagementEvents(true)
                     .excludeManagementEventSources("kms.amazonaws.com")));
@@ -337,5 +344,12 @@ class CloudTrailManagementEventsIntegrationTest {
 
     private static String suffix() {
         return UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private static String cloudTrailBucketPolicy(String bucket) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"cloudtrail.amazonaws.com"},
+                  "Action":["s3:GetBucketAcl","s3:PutObject"],"Resource":["arn:aws:s3:::%1$s","arn:aws:s3:::%1$s/*"]}]}"""
+                .formatted(bucket);
     }
 }

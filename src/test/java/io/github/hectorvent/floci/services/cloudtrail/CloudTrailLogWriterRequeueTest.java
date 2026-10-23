@@ -60,7 +60,7 @@ class CloudTrailLogWriterRequeueTest {
         createBucket(bucket);
 
         Trail trail = new Trail(trailName, "arn:aws:cloudtrail:" + region + ":000000000000:trail/" + trailName,
-                bucket, null, null, true, false, region, false, false, false, false);
+                bucket, null, null, true, false, region, false, false, false, false, null, null);
         CloudTrailService.TrailKey key = new CloudTrailService.TrailKey(region, trailName, region);
 
         ObjectMapper mapper = new ObjectMapper();

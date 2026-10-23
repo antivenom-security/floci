@@ -1220,11 +1220,13 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        /** How often the writer flushes pending records into the destination
-         *  bucket. Real AWS delivers data events with ~5-minute lag; the
-         *  default here is 60s so dev/CI feedback loops stay fast. */
-        @WithDefault("60")
+        /** How often the writer delivers pending records, AWS's "about every 5 minutes". */
+        @WithDefault("300")
         int flushIntervalSeconds();
+
+        /** How often a trail with log file validation writes a digest file, AWS's hourly. */
+        @WithDefault("3600")
+        int digestIntervalSeconds();
 
         CloudTrailManagementEventsConfig managementEvents();
 

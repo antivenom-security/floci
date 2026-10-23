@@ -27,14 +27,17 @@ public class CloudTrailJsonHandler {
 
     private final CloudTrailService service;
     private final EventHistoryStore eventHistory;
+    private final CloudTrailDigestWriter digestWriter;
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
 
     @Inject
     public CloudTrailJsonHandler(CloudTrailService service, EventHistoryStore eventHistory,
-                                 RegionResolver regionResolver, ObjectMapper mapper) {
+                                 CloudTrailDigestWriter digestWriter, RegionResolver regionResolver,
+                                 ObjectMapper mapper) {
         this.service = service;
         this.eventHistory = eventHistory;
+        this.digestWriter = digestWriter;
         this.regionResolver = regionResolver;
         this.mapper = mapper;
     }
@@ -52,6 +55,7 @@ public class CloudTrailJsonHandler {
             case "GetTrailStatus" -> getTrailStatus(request, region);
             case "LookupEvents" -> lookupEvents(request, region);
             case "ListTrails" -> listTrails(request, region);
+            case "ListPublicKeys" -> listPublicKeys(request, region);
             case "AddTags" -> addTags(request);
             case "RemoveTags" -> removeTags(request);
             case "ListTags" -> listTags(request);
@@ -74,7 +78,8 @@ public class CloudTrailJsonHandler {
         Map<String, String> tags = parseTagsList(req.path("TagsList"));
 
         Trail trail = service.createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags,
+                req.path("CloudWatchLogsLogGroupArn").asText(null), req.path("CloudWatchLogsRoleArn").asText(null));
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());
@@ -89,6 +94,7 @@ public class CloudTrailJsonHandler {
         resp.put("TrailARN", trail.trailArn());
         resp.put("LogFileValidationEnabled", trail.logFileValidationEnabled());
         resp.put("IsOrganizationTrail", trail.isOrganizationTrail());
+        putCloudWatchLogs(resp, trail);
         return Response.ok(resp).build();
     }
 
@@ -114,7 +120,8 @@ public class CloudTrailJsonHandler {
                 ? req.path("IsOrganizationTrail").asBoolean() : null;
 
         Trail trail = service.updateTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicName,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail,
+                req.path("CloudWatchLogsLogGroupArn").asText(null), req.path("CloudWatchLogsRoleArn").asText(null));
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());
@@ -129,6 +136,7 @@ public class CloudTrailJsonHandler {
         resp.put("TrailARN", trail.trailArn());
         resp.put("LogFileValidationEnabled", trail.logFileValidationEnabled());
         resp.put("IsOrganizationTrail", trail.isOrganizationTrail());
+        putCloudWatchLogs(resp, trail);
         return Response.ok(resp).build();
     }
 
@@ -224,6 +232,43 @@ public class CloudTrailJsonHandler {
         }
         if (status.stopLoggingTime() != null) {
             resp.put("StopLoggingTime", status.stopLoggingTime() / 1000.0);
+        }
+        CloudTrailEntry.ChannelStatus channels = status.channels();
+        putStatus(resp, "LatestCloudWatchLogsDeliveryTime", channels.cloudWatchLogsDeliveryTime(),
+                "LatestCloudWatchLogsDeliveryError", channels.cloudWatchLogsDeliveryError());
+        putStatus(resp, "LatestNotificationTime", channels.notificationTime(),
+                "LatestNotificationError", channels.notificationError());
+        putStatus(resp, "LatestDigestDeliveryTime", channels.digestDeliveryTime(),
+                "LatestDigestDeliveryError", channels.digestDeliveryError());
+        return Response.ok(resp).build();
+    }
+
+    private static void putStatus(ObjectNode resp, String timeField, Long time, String errorField, String error) {
+        if (time != null) {
+            resp.put(timeField, time / 1000.0);
+        }
+        if (error != null) {
+            resp.put(errorField, error);
+        }
+    }
+
+    private static void putCloudWatchLogs(ObjectNode resp, Trail trail) {
+        if (trail.cloudWatchLogsLogGroupArn() != null) {
+            resp.put("CloudWatchLogsLogGroupArn", trail.cloudWatchLogsLogGroupArn());
+            resp.put("CloudWatchLogsRoleArn", trail.cloudWatchLogsRoleArn());
+        }
+    }
+
+    private Response listPublicKeys(JsonNode req, String region) {
+        ObjectNode resp = mapper.createObjectNode();
+        ArrayNode keys = resp.putArray("PublicKeyList");
+        for (CloudTrailDigestWriter.DigestKey key : digestWriter.publicKeys(region,
+                timestamp(req.get("StartTime")), timestamp(req.get("EndTime")))) {
+            keys.addObject()
+                    .put("Value", key.publicKey())
+                    .put("ValidityStartTime", BigDecimal.valueOf(key.validityStart()).movePointLeft(3))
+                    .put("ValidityEndTime", BigDecimal.valueOf(key.validityEnd()).movePointLeft(3))
+                    .put("Fingerprint", key.fingerprint());
         }
         return Response.ok(resp).build();
     }

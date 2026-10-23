@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestIdFilter;
+import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -23,6 +24,7 @@ import io.github.hectorvent.floci.services.cloudtrail.record.CloudTrailEvent;
 import io.github.hectorvent.floci.services.cloudtrail.record.CloudTrailRecordBuilder;
 import io.github.hectorvent.floci.services.cloudtrail.record.TlsDetails;
 import io.github.hectorvent.floci.services.cloudtrail.record.UserIdentityBuilder;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -38,6 +40,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -48,12 +51,16 @@ public class CloudTrailService {
     private static final String S3_EVENT_SOURCE = ServicePrincipals.of("s3");
     static final int MAX_PENDING_RECORDS_PER_TRAIL = 1024;
     static final long MAX_PENDING_BYTES_PER_TRAIL = 4L * 1024L * 1024L;
+    static final long MAX_LOG_FILE_BYTES = 50L * 1024L * 1024L;
+    private static final int LOG_FILE_ENVELOPE_BYTES = 64;
 
     private final StorageBackend<String, CloudTrailEntry> store;
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final CloudTrailRecordBuilder recordBuilder;
     private final UserIdentityBuilder userIdentityBuilder;
+    private final ServiceCallAuthorizer serviceCallAuthorizer;
+    private volatile Runnable bufferFullListener = () -> { };
 
     /** Per-trail pending record buffers: ephemeral, never persisted. */
     private final ConcurrentHashMap<PendingTrailKey, PendingRecordBuffer> pendingRecordsByTrail =
@@ -71,18 +78,20 @@ public class CloudTrailService {
     CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver,
                       IamService iamService, ObjectMapper mapper) {
         this(storageFactory, regionResolver, mapper, new CloudTrailRecordBuilder(mapper),
-                new UserIdentityBuilder(iamService, regionResolver, mapper));
+                new UserIdentityBuilder(iamService, regionResolver, mapper), null);
     }
 
     @Inject
     public CloudTrailService(StorageFactory storageFactory, RegionResolver regionResolver, ObjectMapper mapper,
-                             CloudTrailRecordBuilder recordBuilder, UserIdentityBuilder userIdentityBuilder) {
+                             CloudTrailRecordBuilder recordBuilder, UserIdentityBuilder userIdentityBuilder,
+                             ServiceCallAuthorizer serviceCallAuthorizer) {
         this.store = storageFactory.create("cloudtrail", "cloudtrail-trails.json",
                 new TypeReference<Map<String, CloudTrailEntry>>() {});
         this.regionResolver = regionResolver;
         this.mapper = mapper;
         this.recordBuilder = recordBuilder;
         this.userIdentityBuilder = userIdentityBuilder;
+        this.serviceCallAuthorizer = serviceCallAuthorizer;
     }
 
     // --- Control plane ---
@@ -106,6 +115,15 @@ public class CloudTrailService {
                              String snsTopicArn, boolean includeGlobalServiceEvents,
                              boolean isMultiRegionTrail, boolean enableLogFileValidation,
                              boolean isOrganizationTrail, Map<String, String> tags) {
+        return createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn, includeGlobalServiceEvents,
+                isMultiRegionTrail, enableLogFileValidation, isOrganizationTrail, tags, null, null);
+    }
+
+    public Trail createTrail(String region, String name, String s3BucketName, String s3KeyPrefix,
+                             String snsTopicArn, boolean includeGlobalServiceEvents,
+                             boolean isMultiRegionTrail, boolean enableLogFileValidation,
+                             boolean isOrganizationTrail, Map<String, String> tags,
+                             String cloudWatchLogsLogGroupArn, String cloudWatchLogsRoleArn) {
         validateTrailName(name);
         if (s3BucketName == null || s3BucketName.isEmpty()) {
             throw new AwsException("S3BucketDoesNotExistException", "S3 bucket name is required.", 400);
@@ -123,12 +141,16 @@ public class CloudTrailService {
         }
         String arn = AwsArnUtils.Arn.of("cloudtrail", region, regionResolver.getAccountId(),
                 "trail/" + name).toString();
+        String topicArn = topicArn(region, snsTopicArn);
+        validateCloudWatchLogs(cloudWatchLogsLogGroupArn, cloudWatchLogsRoleArn);
+        checkDestinationPolicies(region, arn, s3BucketName, s3KeyPrefix, topicArn);
         Trail trail = new Trail(
-                name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
+                name, arn, s3BucketName, s3KeyPrefix, topicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
-                enableLogFileValidation, false, false, isOrganizationTrail);
+                enableLogFileValidation, false, false, isOrganizationTrail,
+                cloudWatchLogsLogGroupArn, cloudWatchLogsRoleArn);
         store.put(key, new CloudTrailEntry(trail, List.of(), List.of(), false, null, null,
-                initialTags, null, null));
+                initialTags, null, null, null));
         return trail;
     }
 
@@ -143,25 +165,47 @@ public class CloudTrailService {
                              String s3BucketName, String s3KeyPrefix, String snsTopicArn,
                              Boolean includeGlobalServiceEvents, Boolean isMultiRegionTrail,
                              Boolean enableLogFileValidation, Boolean isOrganizationTrail) {
+        return updateTrail(region, trailNameOrArn, s3BucketName, s3KeyPrefix, snsTopicArn, includeGlobalServiceEvents,
+                isMultiRegionTrail, enableLogFileValidation, isOrganizationTrail, null, null);
+    }
+
+    /** A null argument keeps the trail's value; an empty CloudWatch Logs ARN removes the delivery. */
+    public Trail updateTrail(String region, String trailNameOrArn,
+                             String s3BucketName, String s3KeyPrefix, String snsTopicArn,
+                             Boolean includeGlobalServiceEvents, Boolean isMultiRegionTrail,
+                             Boolean enableLogFileValidation, Boolean isOrganizationTrail,
+                             String cloudWatchLogsLogGroupArn, String cloudWatchLogsRoleArn) {
         Trail resolved = findTrailOrThrow(region, trailNameOrArn);
         String key = regionKey(resolved.homeRegion(), resolved.name());
         return withTrailLock(key, () -> {
             CloudTrailEntry entry = store.get(key).orElseThrow(() -> new AwsException(
                     "TrailNotFoundException", "Unknown trail: " + trailNameOrArn, 400));
             Trail existing = entry.trail();
+            String logGroupArn = cloudWatchLogsLogGroupArn == null ? existing.cloudWatchLogsLogGroupArn()
+                    : cloudWatchLogsLogGroupArn.isEmpty() ? null : cloudWatchLogsLogGroupArn;
+            String logsRoleArn = cloudWatchLogsRoleArn == null ? existing.cloudWatchLogsRoleArn()
+                    : cloudWatchLogsRoleArn.isEmpty() ? null : cloudWatchLogsRoleArn;
+            validateCloudWatchLogs(logGroupArn, logsRoleArn);
+            if (s3BucketName != null || s3KeyPrefix != null || snsTopicArn != null) {
+                checkDestinationPolicies(existing.homeRegion(), existing.trailArn(),
+                        s3BucketName != null ? s3BucketName : existing.s3BucketName(),
+                        s3KeyPrefix != null ? s3KeyPrefix : existing.s3KeyPrefix(),
+                        snsTopicArn != null ? topicArn(existing.homeRegion(), snsTopicArn) : existing.snsTopicArn());
+            }
             Trail updated = new Trail(
                     existing.name(),
                     existing.trailArn(),
                     s3BucketName != null ? s3BucketName : existing.s3BucketName(),
                     s3KeyPrefix != null ? s3KeyPrefix : existing.s3KeyPrefix(),
-                    snsTopicArn != null ? snsTopicArn : existing.snsTopicArn(),
+                    snsTopicArn != null ? topicArn(existing.homeRegion(), snsTopicArn) : existing.snsTopicArn(),
                     includeGlobalServiceEvents != null ? includeGlobalServiceEvents : existing.includeGlobalServiceEvents(),
                     isMultiRegionTrail != null ? isMultiRegionTrail : existing.isMultiRegionTrail(),
                     existing.homeRegion(),
                     enableLogFileValidation != null ? enableLogFileValidation : existing.logFileValidationEnabled(),
                     existing.hasCustomEventSelectors(),
                     existing.hasInsightSelectors(),
-                    isOrganizationTrail != null ? isOrganizationTrail : existing.isOrganizationTrail());
+                    isOrganizationTrail != null ? isOrganizationTrail : existing.isOrganizationTrail(),
+                    logGroupArn, logsRoleArn);
             store.put(key, entry.withTrail(updated));
             return updated;
         });
@@ -258,8 +302,77 @@ public class CloudTrailService {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
         return store.get(regionKey(trail.homeRegion(), trail.name()))
                 .map(e -> new TrailStatus(e.logging(), e.startLoggingTime(), e.stopLoggingTime(),
-                        e.latestDeliveryTime(), e.latestDeliveryError()))
-                .orElse(new TrailStatus(false, null, null, null, null));
+                        e.latestDeliveryTime(), e.latestDeliveryError(), e.channels()))
+                .orElse(new TrailStatus(false, null, null, null, null, null));
+    }
+
+    /** Every trail that is logging, with the time it started. */
+    public List<CloudTrailEntry> loggingTrails() {
+        List<CloudTrailEntry> result = new ArrayList<>();
+        for (String k : store.keys()) {
+            store.get(k).filter(CloudTrailEntry::logging).ifPresent(result::add);
+        }
+        return result;
+    }
+
+    public void updateChannels(String trailRegion, String trailName,
+                               UnaryOperator<CloudTrailEntry.ChannelStatus> update) {
+        String storeKey = regionKey(trailRegion, trailName);
+        withTrailLock(storeKey, () -> store.get(storeKey)
+                .ifPresent(entry -> store.put(storeKey, entry.withChannels(update.apply(entry.channels())))));
+    }
+
+    void onBufferFull(Runnable listener) {
+        bufferFullListener = listener;
+    }
+
+    private String topicArn(String region, String topic) {
+        if (topic == null || topic.isEmpty()) {
+            return null;
+        }
+        return AwsArnUtils.isArn(topic) ? topic
+                : AwsArnUtils.Arn.of("sns", region, regionResolver.getAccountId(), topic).toString();
+    }
+
+    private static void validateCloudWatchLogs(String logGroupArn, String roleArn) {
+        if (logGroupArn != null && roleArn == null) {
+            throw new AwsException("InvalidCloudWatchLogsRoleArnException",
+                    "You must specify a role ARN along with a CloudWatch Logs log group ARN.", 400);
+        }
+        if (roleArn != null && logGroupArn == null) {
+            throw new AwsException("InvalidCloudWatchLogsLogGroupArnException",
+                    "You must specify a CloudWatch Logs log group ARN along with a role ARN.", 400);
+        }
+    }
+
+    /**
+     * CreateTrail's check that the bucket policy lets CloudTrail read the bucket ACL and write its logs,
+     * and that the topic policy lets it publish, under the conditions AWS's documented policies set.
+     */
+    private void checkDestinationPolicies(String region, String trailArn, String bucket, String prefix,
+                                          String topicArn) {
+        if (serviceCallAuthorizer == null) {
+            return;
+        }
+        String account = regionResolver.getAccountId();
+        String bucketArn = AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "s3", "", bucket).toString();
+        String logsArn = bucketArn + "/" + keyPrefix(prefix) + "AWSLogs/" + account + "/CloudTrail";
+        if (serviceCallAuthorizer.authorize("cloudtrail", "s3:GetBucketAcl", bucketArn, trailArn, account)
+                != IamPolicyEvaluator.Decision.ALLOW
+                || serviceCallAuthorizer.authorize("cloudtrail", "s3:PutObject", logsArn, trailArn, account,
+                Map.of("s3:x-amz-acl", List.of("bucket-owner-full-control"))) != IamPolicyEvaluator.Decision.ALLOW) {
+            throw new AwsException("InsufficientS3BucketPolicyException",
+                    "Incorrect S3 bucket policy is detected for bucket: " + bucket, 400);
+        }
+        if (topicArn != null && serviceCallAuthorizer.authorize("cloudtrail", "sns:Publish", topicArn, trailArn,
+                account) != IamPolicyEvaluator.Decision.ALLOW) {
+            throw new AwsException("InsufficientSnsTopicPolicyException",
+                    "Incorrect SNS topic policy is detected for topic: " + topicArn, 400);
+        }
+    }
+
+    static String keyPrefix(String prefix) {
+        return prefix == null || prefix.isEmpty() ? "" : prefix + (prefix.endsWith("/") ? "" : "/");
     }
 
     // --- Tagging ---
@@ -374,7 +487,7 @@ public class CloudTrailService {
                 if (accepted) {
                     LOG.tracev("Emitted CloudTrail event {0} for trail {1}", in.eventName(), mt.trail().name());
                 } else {
-                    LOG.tracev("Dropped CloudTrail event {0} for trail {1}: retry buffer is full",
+                    LOG.debugv("Dropped CloudTrail event {0} for trail {1}: delivery is failing and the buffer is full",
                             in.eventName(), mt.trail().name());
                 }
             }
@@ -400,7 +513,7 @@ public class CloudTrailService {
                 continue;
             }
             if (!append(new TrailKey(trailRegion, entry.trail().name(), eventRegion), record.deepCopy())) {
-                LOG.tracev("Dropped CloudTrail event {0} for trail {1}: retry buffer is full",
+                LOG.debugv("Dropped CloudTrail event {0} for trail {1}: delivery is failing and the buffer is full",
                         record.path("eventName").asText(), entry.trail().name());
             }
         }
@@ -486,14 +599,24 @@ public class CloudTrailService {
         withTrailLock(storeKey, () -> store.get(storeKey).ifPresent(entry -> store.put(storeKey, update.apply(entry))));
     }
 
+    /**
+     * Queues a record for delivery. A full buffer asks the writer for an early delivery instead of
+     * dropping; only while the trail's last delivery failed does a full buffer refuse records, which
+     * {@code GetTrailStatus.LatestDeliveryError} reports.
+     */
     private boolean append(TrailKey key, ObjectNode record) {
         long recordBytes = estimatedRecordBytes(record);
         boolean[] accepted = {false};
+        boolean[] full = {false};
         pendingRecordsByTrail.compute(pendingTrailKey(key), (ignored, buffer) -> {
             PendingRecordBuffer updated = buffer == null ? new PendingRecordBuffer() : buffer;
             accepted[0] = updated.append(key.eventRegion(), record, recordBytes);
+            full[0] = updated.full(0);
             return updated.isEmpty() ? null : updated;
         });
+        if (accepted[0] && full[0]) {
+            bufferFullListener.run();
+        }
         return accepted[0];
     }
 
@@ -522,11 +645,15 @@ public class CloudTrailService {
         private final Map<String, List<PendingRecord>> inFlightByRegion = new ConcurrentHashMap<>();
         private int recordCount;
         private long byteCount;
+        private boolean failing;
+
+        synchronized boolean full(long recordBytes) {
+            return recordCount >= MAX_PENDING_RECORDS_PER_TRAIL
+                    || byteCount + recordBytes > MAX_PENDING_BYTES_PER_TRAIL;
+        }
 
         synchronized boolean append(String eventRegion, ObjectNode record, long recordBytes) {
-            if (!inFlightByRegion.isEmpty()
-                    && (recordCount >= MAX_PENDING_RECORDS_PER_TRAIL
-                    || byteCount + recordBytes > MAX_PENDING_BYTES_PER_TRAIL)) {
+            if (failing && full(recordBytes)) {
                 return false;
             }
             recordsByRegion.computeIfAbsent(eventRegion, ignored -> new ArrayDeque<>())
@@ -540,6 +667,7 @@ public class CloudTrailService {
             ArrayDeque<PendingRecord> records = recordsByRegion.computeIfAbsent(
                     eventRegion, ignored -> new ArrayDeque<>());
             boolean wasInFlight = inFlightByRegion.remove(eventRegion) != null;
+            failing = true;
             for (int i = drained.size() - 1; i >= 0; i--) {
                 PendingRecord pending = drained.get(i);
                 records.addFirst(pending);
@@ -561,7 +689,10 @@ public class CloudTrailService {
                 return List.of();
             }
             List<PendingRecord> selected = new ArrayList<>(Math.min(records.size(), maxRecords));
-            while (selected.size() < maxRecords && !records.isEmpty()) {
+            long fileBytes = LOG_FILE_ENVELOPE_BYTES;
+            while (selected.size() < maxRecords && !records.isEmpty()
+                    && (selected.isEmpty() || fileBytes + records.peekFirst().byteCount() + 1 <= MAX_LOG_FILE_BYTES)) {
+                fileBytes += records.peekFirst().byteCount() + 1;
                 selected.add(records.removeFirst());
             }
             if (!records.isEmpty()) {
@@ -580,6 +711,7 @@ public class CloudTrailService {
             if (inFlight == null) {
                 return;
             }
+            failing = false;
             for (PendingRecord pending : inFlight) {
                 recordCount--;
                 byteCount -= pending.byteCount();
@@ -942,9 +1074,10 @@ public class CloudTrailService {
     }
 
     public record TrailStatus(boolean logging, Long startLoggingTime, Long stopLoggingTime,
-                              Long latestDeliveryTime, String latestDeliveryError) {
-        public TrailStatus(boolean logging, Long startLoggingTime, Long stopLoggingTime) {
-            this(logging, startLoggingTime, stopLoggingTime, null, null);
+                              Long latestDeliveryTime, String latestDeliveryError,
+                              CloudTrailEntry.ChannelStatus channels) {
+        public TrailStatus {
+            channels = channels == null ? CloudTrailEntry.ChannelStatus.NONE : channels;
         }
     }
 

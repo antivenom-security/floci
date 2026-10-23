@@ -9,8 +9,49 @@ data events to the trail's destination bucket as gzipped JSON log files at
 the AWS-shaped key path:
 
 ```
-${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_CloudTrail_${region}_${YYYYMMDDTHHMMZ}_${rand12}.json.gz
+${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_CloudTrail_${region}_${YYYYMMDDTHHMMZ}_${rand16}.json.gz
 ```
+
+## Delivery
+
+- Log files are written every `flush-interval-seconds` (AWS's five minutes
+  by default), one file per event region, dated by when they are published,
+  holding at most 1,000 records and 50 MB uncompressed.
+- Nothing is dropped while the destination accepts writes: a trail whose
+  buffer reaches 1,024 records or 4 MB is delivered early. While delivery
+  fails, the buffer keeps the oldest records up to that size and refuses the
+  rest, and `GetTrailStatus` reports the failure in `LatestDeliveryError`.
+- A trail with `CloudWatchLogsLogGroupArn` and `CloudWatchLogsRoleArn` sends
+  each delivered record as one log event to the stream
+  `${accountId}_CloudTrail_${region}`, skipping records over 256 KB.
+  `GetTrailStatus` reports `LatestCloudWatchLogsDeliveryTime` and
+  `LatestCloudWatchLogsDeliveryError`.
+- A trail with an SNS topic publishes `{"s3Bucket": ..., "s3ObjectKey": [...]}`
+  after each delivered file, reported in `LatestNotificationTime` and
+  `LatestNotificationError`.
+- A trail with log file validation writes a digest file every
+  `digest-interval-seconds` (hourly by default) for its home region and every
+  region it delivered logs for, even when no log file was delivered:
+
+  ```
+  ${prefix}AWSLogs/${accountId}/CloudTrail-Digest/${region}/yyyy/MM/dd/${accountId}_CloudTrail-Digest_${region}_${trail}_${homeRegion}_${YYYYMMDDTHHmmssZ}.json.gz
+  ```
+
+  Digests chain to the previous one and are signed with `SHA256withRSA` by a
+  per-region RSA-2048 key, the signature in the object's `signature` metadata.
+  `ListPublicKeys` returns the key, so `aws cloudtrail validate-logs` verifies
+  the files. `LatestDigestDeliveryTime` and `LatestDigestDeliveryError` report
+  the outcome. The digest chain is kept in memory and restarts with Floci.
+
+With `floci.services.iam.enforcement-enabled`, `CreateTrail` and `UpdateTrail`
+check that the bucket policy lets `cloudtrail.amazonaws.com` perform
+`s3:GetBucketAcl` and `s3:PutObject` (with `s3:x-amz-acl` set to
+`bucket-owner-full-control` and `aws:SourceArn` set to the trail) and that the
+topic policy lets it perform `SNS:Publish`, failing with
+`InsufficientS3BucketPolicyException` or `InsufficientSnsTopicPolicyException`.
+CloudWatch Logs delivery then requires the role to trust
+`cloudtrail.amazonaws.com` and allow `logs:CreateLogStream` and
+`logs:PutLogEvents`.
 
 ## Supported Actions
 
@@ -28,6 +69,7 @@ ${prefix}AWSLogs/${accountId}/CloudTrail/${region}/yyyy/MM/dd/${accountId}_Cloud
 | `GetTrailStatus` | Returns the logging status of a trail |
 | `LookupEvents` | Returns event history newest first, filtered by one lookup attribute and a time range, with or without a trail |
 | `ListTrails` | - |
+| `ListPublicKeys` | - |
 | `AddTags` | Adds or overwrites tags on a trail, identified by ARN |
 | `RemoveTags` | Removes the given tag keys from a trail, identified by ARN |
 | `ListTags` | Returns the tags for one or more trails, identified by ARN |
@@ -121,7 +163,8 @@ recorded as `PostObject` when IAM refuses it.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDTRAIL_ENABLED` | `true` | Enable or disable the service |
-| `FLOCI_SERVICES_CLOUDTRAIL_FLUSH_INTERVAL_SECONDS` | `60` | How often the writer flushes buffered records into the destination bucket. Real CloudTrail delivers with ~5 minute latency; the local default is shorter for fast feedback loops. |
+| `FLOCI_SERVICES_CLOUDTRAIL_FLUSH_INTERVAL_SECONDS` | `300` | How often the writer delivers buffered records, AWS's "about every 5 minutes". Lower it for fast feedback loops. |
+| `FLOCI_SERVICES_CLOUDTRAIL_DIGEST_INTERVAL_SECONDS` | `3600` | How often a trail with log file validation writes a digest file, AWS's hourly |
 | `FLOCI_SERVICES_CLOUDTRAIL_MANAGEMENT_EVENTS_ENABLED` | `true` | Record management events into event history and trails |
 | `FLOCI_SERVICES_CLOUDTRAIL_EVENT_HISTORY_RETENTION_DAYS` | `90` | How long event history keeps an event |
 | `FLOCI_SERVICES_CLOUDTRAIL_EVENT_HISTORY_MAX_EVENTS` | `200000` | Event history size, across accounts and regions; the oldest events are evicted past it |
@@ -159,7 +202,7 @@ aws cloudtrail start-logging --name my-trail
 echo hello | aws s3 cp - s3://my-source/greeting.txt
 aws s3 cp s3://my-source/greeting.txt -
 
-# After ~60s, log files appear
+# After ~5 minutes, log files appear
 aws s3 ls s3://my-trail-logs/AWSLogs/ --recursive
 
 # Event history, newest first, with or without a trail
