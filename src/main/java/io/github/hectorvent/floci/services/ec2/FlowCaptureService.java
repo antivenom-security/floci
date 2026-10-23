@@ -110,8 +110,13 @@ public class FlowCaptureService {
             for (SecurityGroupFirewallManager.ProtectedEndpoint pe : managed) {
                 live.add(pe.helperId());
                 enis.add(describe(pe.endpoint()));
-                ContainerExec.Result poll = ContainerExec.run(dockerClient, pe.helperId(),
-                        new String[]{"sh", "-c", POLL}, 10);
+                ContainerExec.Result poll;
+                try {
+                    poll = ContainerExec.run(dockerClient, pe.helperId(), new String[]{"sh", "-c", POLL}, 10);
+                } catch (RuntimeException e) {
+                    LOG.debugv("Flow capture poll failed for {0}: {1}", pe.endpoint().eniId(), e.getMessage());
+                    continue;
+                }
                 if (poll.timedOut() || poll.exitCode() != 0) {
                     LOG.debugv("Flow capture poll failed for {0}: {1}", pe.endpoint().eniId(), poll.summary());
                     continue;

@@ -467,15 +467,15 @@ public class FlowLogService {
         String group = fl.getLogGroupName();
         String stream = eniId + "-" + fl.getTrafficType().toLowerCase(Locale.ROOT);
         try {
-            if (!logsService.logGroupExists(group, fl.getRegion())) {
+            try {
                 logsService.createLogGroupForAccount(fl.getAccountId(), group, null, Map.of(), fl.getRegion());
+            } catch (AwsException e) {
+                requireAlreadyExists(e);
             }
             try {
                 logsService.createLogStreamForAccount(fl.getAccountId(), group, stream, fl.getRegion());
             } catch (AwsException e) {
-                if (!"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
-                    throw e;
-                }
+                requireAlreadyExists(e);
             }
             List<Map<String, Object>> events = new ArrayList<>();
             for (int i = 0; i < rows.size(); i++) {
@@ -486,6 +486,12 @@ public class FlowLogService {
         } catch (RuntimeException e) {
             LOG.warnv("Flow log {0} could not deliver {1} records to {2}/{3}: {4}",
                     fl.getFlowLogId(), rows.size(), group, stream, e.getMessage());
+        }
+    }
+
+    private static void requireAlreadyExists(AwsException e) {
+        if (!"ResourceAlreadyExistsException".equals(e.getErrorCode())) {
+            throw e;
         }
     }
 
