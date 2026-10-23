@@ -11,12 +11,16 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.mockito.ArgumentCaptor;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -34,7 +38,24 @@ class SecurityGroupFirewallManagerTest {
 
     @Test
     void helperCarriesTheResolverAndHostsItsWorkloadsUse() {
+        ContainerSpec helper = helperSpec(Optional.empty());
+
+        assertTrue(helper.dnsServers().contains("172.18.0.2"), "the helper uses Floci's DNS");
+        assertTrue(helper.extraHosts().contains("host.docker.internal:host-gateway"),
+                "the helper resolves host.docker.internal");
+        assertEquals(Map.of("net.netfilter.nf_conntrack_acct", "1"), helper.linuxOptions().sysctls(),
+                "observed flow logs, the default with enforcement on, need conntrack accounting");
+    }
+
+    /** The sysctl fails container creation where nf_conntrack is not loaded, so only flow logs ask for it. */
+    @Test
+    void helperSetsNoSysctlUnlessFlowLogsAreObserved() {
+        assertEquals(Map.of(), helperSpec(Optional.of("synthetic")).linuxOptions().sysctls());
+    }
+
+    private static ContainerSpec helperSpec(Optional<String> flowLogsMode) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ec2().flowLogs().mode()).thenReturn(flowLogsMode);
         when(config.network().securityGroupEnforcement().enabled()).thenReturn(true);
         when(config.network().securityGroupEnforcement().helperImage()).thenReturn("floci/network-helper:local");
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
@@ -59,9 +80,7 @@ class SecurityGroupFirewallManagerTest {
 
         ArgumentCaptor<ContainerSpec> helper = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).createAndStart(helper.capture());
-        assertTrue(helper.getValue().dnsServers().contains("172.18.0.2"), "the helper uses Floci's DNS");
-        assertTrue(helper.getValue().extraHosts().contains("host.docker.internal:host-gateway"),
-                "the helper resolves host.docker.internal");
+        return helper.getValue();
     }
 
     @Test
@@ -114,6 +133,35 @@ class SecurityGroupFirewallManagerTest {
         verify(lifecycleManager).removeIfExists("legacy-only");
         verify(lifecycleManager).removeIfExists("both");
         verify(lifecycleManager, never()).removeIfExists("disagreeing");
+    }
+
+    @Test
+    @Timeout(10)
+    void endpointLookupDoesNotWaitForTheFirewallLock() throws Exception {
+        SecurityGroupFirewallManager manager = new SecurityGroupFirewallManager(mock(DockerClient.class),
+                mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), mock(EmbeddedDnsServer.class));
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            synchronized (manager) {
+                locked.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        });
+        holder.start();
+        try {
+            locked.await();
+            assertTrue(CompletableFuture.supplyAsync(() -> manager.endpointAt("172.18.0.9"))
+                    .get(2, TimeUnit.SECONDS).isEmpty());
+        } finally {
+            release.countDown();
+            holder.join();
+        }
     }
 
     private static Container exitedEcsHelper(String id, Map<String, String> ownerLabels) {

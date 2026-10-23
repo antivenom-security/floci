@@ -95,6 +95,8 @@ public class Route53ResolverService {
      * shapes carries {@code Tags}, and the handlers return stored nodes verbatim.
      */
     private final StorageBackend<String, ObjectNode> tagStore;
+    private final StorageBackend<String, ObjectNode> queryLogConfigStore;
+    private final StorageBackend<String, ObjectNode> queryLogAssociationStore;
     private final ObjectMapper objectMapper;
 
     @Inject
@@ -112,6 +114,11 @@ public class Route53ResolverService {
                 new TypeReference<Map<String, ObjectNode>>() {});
         this.tagStore = storageFactory.create("route53resolver", "route53resolver-tags.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
+        this.queryLogConfigStore = storageFactory.create("route53resolver",
+                "route53resolver-query-log-configs.json", new TypeReference<Map<String, ObjectNode>>() {});
+        this.queryLogAssociationStore = storageFactory.create("route53resolver",
+                "route53resolver-query-log-config-associations.json",
+                new TypeReference<Map<String, ObjectNode>>() {});
         this.objectMapper = objectMapper;
     }
 
@@ -124,6 +131,8 @@ public class Route53ResolverService {
                            StorageBackend<String, ObjectNode> ruleAssociationStore,
                            StorageBackend<String, ObjectNode> endpointIpRequestStore,
                            StorageBackend<String, ObjectNode> tagStore,
+                           StorageBackend<String, ObjectNode> queryLogConfigStore,
+                           StorageBackend<String, ObjectNode> queryLogAssociationStore,
                            ObjectMapper objectMapper) {
         this.domainListStore = domainListStore;
         this.endpointStore = endpointStore;
@@ -131,6 +140,8 @@ public class Route53ResolverService {
         this.ruleAssociationStore = ruleAssociationStore;
         this.endpointIpRequestStore = endpointIpRequestStore;
         this.tagStore = tagStore;
+        this.queryLogConfigStore = queryLogConfigStore;
+        this.queryLogAssociationStore = queryLogAssociationStore;
         this.objectMapper = objectMapper;
     }
 
@@ -476,6 +487,158 @@ public class Route53ResolverService {
         return ruleStore.get(ruleId);
     }
 
+    // ---------- Query logging ----------
+
+    /**
+     * Creates a query logging configuration. AWS reports it {@code CREATING} on this call and
+     * {@code CREATED} afterwards; nothing is provisioned here, so it is stored as {@code CREATED}
+     * and only this response says otherwise. S3 and CloudWatch Logs are the destinations Floci
+     * delivers to; a Firehose stream is rejected rather than accepted and never written.
+     */
+    public synchronized ObjectNode createResolverQueryLogConfig(JsonNode request, String region, String accountId) {
+        String name = requireText(request, "Name", INVALID_PARAMETER);
+        String destinationArn = requireText(request, "DestinationArn", INVALID_PARAMETER);
+        requireText(request, "CreatorRequestId", INVALID_PARAMETER);
+        if (!AwsArnUtils.isArnFor(destinationArn, "s3") && !AwsArnUtils.isArnFor(destinationArn, "logs")) {
+            throw new AwsException(INVALID_PARAMETER,
+                    "DestinationArn must be an S3 bucket or a CloudWatch Logs log group: " + destinationArn, 400);
+        }
+        JsonNode tags = validatedTags(request.get("Tags"), INVALID_PARAMETER);
+        Optional<ObjectNode> replay = replayOf(queryLogConfigStore, request, region);
+        if (replay.isPresent()) {
+            requireReplayMatches(replay.get(), request, "Name", "DestinationArn");
+            return withAssociationCount(replay.get());
+        }
+        String id = id("rqlc");
+        ObjectNode config = objectMapper.createObjectNode();
+        config.put("Id", id);
+        config.put("OwnerId", accountId);
+        config.put("Status", "CREATED");
+        config.put("ShareStatus", "NOT_SHARED");
+        config.put("Arn", AwsArnUtils.Arn.of("route53resolver", region, accountId,
+                "resolver-query-log-config/" + id).toString());
+        config.put("Name", name);
+        config.put("DestinationArn", destinationArn);
+        config.put("CreatorRequestId", text(request, "CreatorRequestId"));
+        config.put("CreationTime", Instant.now().toString());
+        queryLogConfigStore.put(id, config);
+        putTags(config, tags);
+        ObjectNode result = withAssociationCount(config);
+        result.put("Status", "CREATING");
+        return result;
+    }
+
+    public ObjectNode getResolverQueryLogConfig(String id) {
+        return withAssociationCount(require(queryLogConfigStore, id, "resolver query log config"));
+    }
+
+    public List<ObjectNode> listResolverQueryLogConfigs() {
+        return queryLogConfigStore.scan(key -> true).stream().map(this::withAssociationCount).toList();
+    }
+
+    /** AWS refuses to delete a configuration that is still associated with a VPC. */
+    public synchronized ObjectNode deleteResolverQueryLogConfig(String id) {
+        ObjectNode config = require(queryLogConfigStore, id, "resolver query log config");
+        if (!queryLogAssociationsOf(id).isEmpty()) {
+            throw new AwsException("InvalidRequestException",
+                    "Resolver query log config " + id + " is still associated with one or more VPCs.", 400);
+        }
+        queryLogConfigStore.delete(id);
+        tagStore.delete(text(config, "Arn"));
+        ObjectNode result = withAssociationCount(config);
+        result.put("Status", "DELETING");
+        return result;
+    }
+
+    /** Stored {@code ACTIVE}; this response reports {@code CREATING}, as AWS's does. */
+    public synchronized ObjectNode associateResolverQueryLogConfig(JsonNode request) {
+        String configId = requireText(request, "ResolverQueryLogConfigId", INVALID_PARAMETER);
+        String vpcId = requireText(request, "ResourceId", INVALID_PARAMETER);
+        require(queryLogConfigStore, configId, "resolver query log config");
+        if (queryLogAssociationsOf(configId).stream().anyMatch(a -> vpcId.equals(text(a, "ResourceId")))) {
+            throw new AwsException("ResourceExistsException",
+                    "Resolver query log config " + configId + " is already associated with " + vpcId, 400);
+        }
+        String id = id("rqlca");
+        ObjectNode association = objectMapper.createObjectNode();
+        association.put("Id", id);
+        association.put("ResolverQueryLogConfigId", configId);
+        association.put("ResourceId", vpcId);
+        association.put("Status", "ACTIVE");
+        association.put("Error", "NONE");
+        association.put("ErrorMessage", "");
+        association.put("CreationTime", Instant.now().toString());
+        queryLogAssociationStore.put(id, association);
+        ObjectNode result = association.deepCopy();
+        result.put("Status", "CREATING");
+        return result;
+    }
+
+    public synchronized ObjectNode disassociateResolverQueryLogConfig(JsonNode request) {
+        String configId = requireText(request, "ResolverQueryLogConfigId", INVALID_PARAMETER);
+        String vpcId = requireText(request, "ResourceId", INVALID_PARAMETER);
+        ObjectNode association = queryLogAssociationsOf(configId).stream()
+                .filter(a -> vpcId.equals(text(a, "ResourceId")))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "No association between resolver query log config " + configId + " and " + vpcId, 400));
+        queryLogAssociationStore.delete(text(association, "Id"));
+        ObjectNode result = association.deepCopy();
+        result.put("Status", "DELETING");
+        return result;
+    }
+
+    public ObjectNode getResolverQueryLogConfigAssociation(String id) {
+        return require(queryLogAssociationStore, id, "resolver query log config association").deepCopy();
+    }
+
+    public List<ObjectNode> listResolverQueryLogConfigAssociations() {
+        return queryLogAssociationStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+    }
+
+    /**
+     * The destinations {@code accountId}'s query logging configurations in {@code region} deliver
+     * to for queries from {@code vpcId}, read off the DNS path where there is no request context,
+     * so the account and region come from the resource the query came from, as for resolver rules.
+     */
+    public List<String> queryLogDestinationsFor(String accountId, String region, String vpcId) {
+        List<String> destinations = new ArrayList<>();
+        for (ObjectNode association : forAccount(queryLogAssociationStore, accountId)) {
+            if (!vpcId.equals(text(association, "ResourceId"))) {
+                continue;
+            }
+            String configId = text(association, "ResolverQueryLogConfigId");
+            forAccount(queryLogConfigStore, accountId).stream()
+                    .filter(config -> configId.equals(text(config, "Id"))
+                            && region.equals(AwsArnUtils.regionOrDefault(text(config, "Arn"), region)))
+                    .map(config -> text(config, "DestinationArn"))
+                    .forEach(destinations::add);
+        }
+        return destinations;
+    }
+
+    private static List<ObjectNode> forAccount(StorageBackend<String, ObjectNode> store, String accountId) {
+        if (store instanceof AccountAwareStorageBackend<?> rawAccountAware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<ObjectNode> accountAware =
+                    (AccountAwareStorageBackend<ObjectNode>) rawAccountAware;
+            return accountAware.scanForAccount(accountId, key -> true);
+        }
+        return store.scan(key -> true);
+    }
+
+    private List<ObjectNode> queryLogAssociationsOf(String configId) {
+        return queryLogAssociationStore.scan(key -> true).stream()
+                .filter(a -> configId.equals(text(a, "ResolverQueryLogConfigId")))
+                .toList();
+    }
+
+    private ObjectNode withAssociationCount(ObjectNode config) {
+        ObjectNode result = config.deepCopy();
+        result.put("AssociationCount", queryLogAssociationsOf(text(config, "Id")).size());
+        return result;
+    }
+
     // ---------- Tagging ----------
 
     public synchronized void tagResource(String arn, JsonNode tags, String region, String accountId) {
@@ -568,6 +731,7 @@ public class Route53ResolverService {
             case "resolver-endpoint" -> endpointStore;
             case "resolver-rule" -> ruleStore;
             case "firewall-domain-list" -> domainListStore;
+            case "resolver-query-log-config" -> queryLogConfigStore;
             default -> null;
         };
         return Optional.ofNullable(store)

@@ -6,10 +6,14 @@ import com.github.dockerjava.api.command.BuildImageResultCallback;
 import com.github.dockerjava.api.command.InspectImageCmd;
 import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.ContainerConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -24,7 +28,7 @@ import static org.mockito.Mockito.when;
  * Covers the decisions this helper makes before it ever touches a Dockerfile: that a caller pointed
  * at something other than Floci's own default is left to pull that image itself, that an image
  * already in the daemon is not rebuilt, and that a build which produces no image id fails instead
- * of reporting success. All are branches the callers depend on and none needs a real daemon, so
+ * of reporting success, and that an image built from an older Dockerfile is rebuilt. All are branches the callers depend on and none needs a real daemon, so
  * they are pinned here rather than only through the EC2 security-group path, which uses the default
  * image and is skipped without Docker.
  */
@@ -54,16 +58,42 @@ class LocallyBuiltHelperImageTest {
     }
 
     @Test
-    void buildsNothingWhenTheImageIsAlreadyInTheDaemon() {
-        stubResolvedImage();
-        InspectImageCmd inspectCmd = mock(InspectImageCmd.class);
-        when(dockerClient.inspectImageCmd(DEFAULT_IMAGE)).thenReturn(inspectCmd);
-        when(inspectCmd.exec()).thenReturn(mock(InspectImageResponse.class));
+    void buildsNothingWhenTheImageIsAlreadyInTheDaemon() throws Exception {
+        stubExistingImage(recipe());
 
         LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
                 DEFAULT_IMAGE, DEFAULT_IMAGE, DOCKERFILE);
 
         verify(dockerClient, never()).buildImageCmd(any(InputStream.class));
+    }
+
+    /** The tag never changes, so an image cached from an older Dockerfile would otherwise live forever. */
+    @Test
+    void rebuildsAnImageBuiltFromAnOlderRecipe() {
+        stubExistingImage("an-older-recipe");
+        stubBuildReturning("sha256:built");
+
+        LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
+                DEFAULT_IMAGE, DEFAULT_IMAGE, DOCKERFILE);
+
+        verify(dockerClient).buildImageCmd(any(InputStream.class));
+    }
+
+    private void stubExistingImage(String recipe) {
+        stubResolvedImage();
+        InspectImageCmd inspectCmd = mock(InspectImageCmd.class);
+        when(dockerClient.inspectImageCmd(DEFAULT_IMAGE)).thenReturn(inspectCmd);
+        InspectImageResponse response = mock(InspectImageResponse.class);
+        ContainerConfig config = mock(ContainerConfig.class);
+        when(config.getLabels()).thenReturn(Map.of("io.floci.helper-recipe", recipe));
+        when(response.getConfig()).thenReturn(config);
+        when(inspectCmd.exec()).thenReturn(response);
+    }
+
+    private static String recipe() throws Exception {
+        try (InputStream in = LocallyBuiltHelperImageTest.class.getResourceAsStream(DOCKERFILE)) {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(in.readAllBytes()));
+        }
     }
 
     @Test

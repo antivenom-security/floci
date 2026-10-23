@@ -707,6 +707,12 @@ floci:
         # so Floci instances sharing a daemon never reconcile each other's networks).
         reconcile-on-startup: true                # FLOCI_SERVICES_EC2_VPC_NETWORKS_RECONCILE_ON_STARTUP
         driver: bridge                            # FLOCI_SERVICES_EC2_VPC_NETWORKS_DRIVER
+      flow-logs:
+        # observed (real traffic, needs security-group enforcement), synthetic or off.
+        # Unset: observed when enforcement is enabled, else synthetic. FLOCI_SERVICES_EC2_FLOW_LOGS_MODE
+        # mode: observed
+        capture-tick-seconds: 10                  # FLOCI_SERVICES_EC2_FLOW_LOGS_CAPTURE_TICK_SECONDS
+        s3-publish-interval-seconds: 300          # FLOCI_SERVICES_EC2_FLOW_LOGS_S3_PUBLISH_INTERVAL_SECONDS
     ecs:
       enabled: true
       mock: false
@@ -900,7 +906,7 @@ floci:
         enabled: true
       event-history:
         retention-days: 90
-        max-events: 200000
+        max-events: 20000
       lookup-rate-limit-per-second: 2
       trust-forwarded-for: false
       eventbridge-delay-seconds: 0
@@ -991,6 +997,8 @@ floci:
       seed-landing-zone: false
     route53resolver:
       enabled: true
+      query-log-s3-interval-seconds: 300
+      query-log-cloudwatch-interval-seconds: 60
     connect:
       enabled: true
     appintegrations:
