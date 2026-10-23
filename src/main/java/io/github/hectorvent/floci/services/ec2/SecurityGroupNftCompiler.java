@@ -25,6 +25,29 @@ public final class SecurityGroupNftCompiler {
         }
     }
 
+    /**
+     * Every packet the policy drops first passes through fl_reject, which counts it per 5-tuple
+     * for flow logs. Declared on each compile so helpers created before it existed gain it.
+     */
+    private static final String REJECT_COUNTERS =
+            "add set inet floci_sg fl_rej4 { type ipv4_addr . inet_service . ipv4_addr . inet_service . inet_proto; "
+            + "flags dynamic,timeout; timeout 5m; size 65536; }\n"
+            + "add set inet floci_sg fl_rej6 { type ipv6_addr . inet_service . ipv6_addr . inet_service . inet_proto; "
+            + "flags dynamic,timeout; timeout 5m; size 65536; }\n"
+            + "add chain inet floci_sg fl_reject\n"
+            + "flush chain inet floci_sg fl_reject\n"
+            + "add rule inet floci_sg fl_reject meta nfproto ipv4 meta l4proto { tcp, udp } "
+            + "update @fl_rej4 { ip saddr . th sport . ip daddr . th dport . meta l4proto counter }\n"
+            + "add rule inet floci_sg fl_reject meta nfproto ipv6 meta l4proto { tcp, udp } "
+            + "update @fl_rej6 { ip6 saddr . th sport . ip6 daddr . th dport . meta l4proto counter }\n"
+            // Without ports the transport header starts with ICMP type, code and checksum, so every
+            // ping would be its own element.
+            + "add rule inet floci_sg fl_reject meta nfproto ipv4 meta l4proto != { tcp, udp } "
+            + "update @fl_rej4 { ip saddr . 0 . ip daddr . 0 . meta l4proto counter }\n"
+            + "add rule inet floci_sg fl_reject meta nfproto ipv6 meta l4proto != { tcp, udp } "
+            + "update @fl_rej6 { ip6 saddr . 0 . ip6 daddr . 0 . meta l4proto counter }\n"
+            + "add rule inet floci_sg fl_reject drop\n";
+
     public static String initialRuleset() {
         return "add table inet floci_sg\n"
                 + "add chain inet floci_sg ingress { type filter hook input priority -10; policy drop; }\n"
@@ -41,7 +64,8 @@ public final class SecurityGroupNftCompiler {
         if (target == null || target.groups() == null || target.groups().isEmpty()) {
             throw new IllegalArgumentException("Protected endpoint needs at least one security group");
         }
-        StringBuilder rules = new StringBuilder("flush chain inet floci_sg ingress\n")
+        StringBuilder rules = new StringBuilder(REJECT_COUNTERS)
+                .append("flush chain inet floci_sg ingress\n")
                 .append("flush chain inet floci_sg egress\n")
                 .append("add rule inet floci_sg ingress iifname lo accept\n")
                 .append("add rule inet floci_sg egress oifname lo accept\n")
@@ -96,7 +120,7 @@ public final class SecurityGroupNftCompiler {
             // A managed peer must never fall through to a broad external CIDR rule
             // evaluated against its Docker bridge IP instead of its logical ENI address.
             for (Endpoint peer : managed) {
-                appendRule(rules, chain, addressField, peer.transportAddress(), "drop");
+                appendRule(rules, chain, addressField, peer.transportAddress(), "jump fl_reject");
             }
             for (SecurityGroup group : target.groups()) {
                 List<IpPermission> permissions = egress
@@ -127,6 +151,7 @@ public final class SecurityGroupNftCompiler {
                     }
                 }
             }
+            rules.append("add rule inet floci_sg ").append(chain).append(" jump fl_reject\n");
         }
         return rules.toString();
     }

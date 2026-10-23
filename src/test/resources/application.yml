@@ -339,6 +339,9 @@ floci:
       # reconcile Docker networks on whatever daemon CI happens to have.
       vpc-networks:
         enabled: false
+      flow-logs:
+        capture-tick-seconds: 10
+        s3-publish-interval-seconds: 300
     ecs:
       enabled: true
       mock: true
@@ -454,7 +457,7 @@ floci:
         enabled: true
       event-history:
         retention-days: 90
-        max-events: 200000
+        max-events: 20000
       lookup-rate-limit-per-second: 2
       trust-forwarded-for: false
     lightsail:
@@ -533,6 +536,8 @@ floci:
       seed-landing-zone: true
     route53resolver:
       enabled: true
+      query-log-s3-interval-seconds: 300
+      query-log-cloudwatch-interval-seconds: 60
     connect:
       enabled: true
     appintegrations:

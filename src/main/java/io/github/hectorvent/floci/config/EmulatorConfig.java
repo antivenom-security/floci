@@ -1089,6 +1089,14 @@ public interface EmulatorConfig {
     interface Route53ResolverServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** How often query logs are written to S3 destinations. AWS publishes about every 5 minutes. */
+        @WithDefault("300")
+        int queryLogS3IntervalSeconds();
+
+        /** How often query logs are written to CloudWatch Logs destinations. */
+        @WithDefault("60")
+        int queryLogCloudwatchIntervalSeconds();
     }
 
     interface NetworkFirewallServiceConfig {
@@ -1252,7 +1260,7 @@ public interface EmulatorConfig {
         int retentionDays();
 
         /** Oldest events are evicted past this many, across all accounts and regions. */
-        @WithDefault("200000")
+        @WithDefault("20000")
         int maxEvents();
     }
 
@@ -3358,6 +3366,28 @@ public interface EmulatorConfig {
 
         /** Docker-network backing for VPCs and subnets. */
         VpcNetworksConfig vpcNetworks();
+
+        /** VPC Flow Logs delivery. */
+        FlowLogsConfig flowLogs();
+    }
+
+    interface FlowLogsConfig {
+        /**
+         * {@code observed} records real traffic at security-group enforcement points,
+         * {@code synthetic} generates random records, {@code off} delivers nothing. Unset means
+         * observed when security-group enforcement is enabled and synthetic otherwise.
+         *
+         * Env var: FLOCI_SERVICES_EC2_FLOW_LOGS_MODE
+         */
+        Optional<String> mode();
+
+        /** Seconds between conntrack and reject-counter polls of each managed ENI. */
+        @WithDefault("10")
+        int captureTickSeconds();
+
+        /** Seconds between flow-log files written to an S3 destination. */
+        @WithDefault("300")
+        int s3PublishIntervalSeconds();
     }
 
     /**

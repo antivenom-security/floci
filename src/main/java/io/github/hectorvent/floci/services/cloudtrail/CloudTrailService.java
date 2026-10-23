@@ -13,7 +13,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestIdFilter;
 import io.github.hectorvent.floci.core.common.ServiceCallAuthorizer;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedFieldSelector;
@@ -54,7 +54,7 @@ public class CloudTrailService {
     static final long MAX_LOG_FILE_BYTES = 50L * 1024L * 1024L;
     private static final int LOG_FILE_ENVELOPE_BYTES = 64;
 
-    private final StorageBackend<String, CloudTrailEntry> store;
+    private final AccountAwareStorageBackend<CloudTrailEntry> store;
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final CloudTrailRecordBuilder recordBuilder;
@@ -498,16 +498,22 @@ public class CloudTrailService {
         }
     }
 
-    /** Appends a management event record to every logging trail whose region and selectors cover it. */
+    /**
+     * Appends a management event record to every logging trail of its recipient account whose region,
+     * global-service setting and selectors cover it.
+     */
     public void routeManagementEvent(ObjectNode record) {
+        String accountId = record.path("recipientAccountId").asText();
         String eventRegion = record.path("awsRegion").asText();
         String eventSource = record.path("eventSource").asText();
         boolean readOnly = record.path("readOnly").asBoolean();
-        for (String k : store.keys()) {
-            CloudTrailEntry entry = store.get(k).orElse(null);
-            String trailRegion = regionFromKey(k);
-            if (entry == null || !entry.logging()
+        boolean global = TrailRouter.globalSigningRegion(eventSource, eventRegion) != null;
+        for (AccountAwareStorageBackend.AccountEntry<CloudTrailEntry> stored : store.scanAllAccountEntries(k -> true)) {
+            CloudTrailEntry entry = stored.value();
+            String trailRegion = regionFromKey(stored.key());
+            if (!stored.accountId().equals(accountId) || !entry.logging()
                     || (!trailRegion.equals(eventRegion) && !entry.trail().isMultiRegionTrail())
+                    || (global && !entry.trail().includeGlobalServiceEvents())
                     || !TrailRouter.logsManagementEvent(entry.selectors(), entry.advancedSelectors(),
                     eventSource, readOnly)) {
                 continue;

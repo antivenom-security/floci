@@ -37,8 +37,24 @@ class SecurityGroupNftCompilerTest {
         String nft = SecurityGroupNftCompiler.compile(target, List.of(allowed, denied), Map.of());
 
         assertTrue(nft.contains("ip saddr 172.17.0.3 tcp dport 443 accept"));
-        assertTrue(nft.indexOf("ip saddr 172.17.0.4 drop")
+        assertTrue(nft.indexOf("ip saddr 172.17.0.4 jump fl_reject")
                 < nft.indexOf("ip saddr 172.17.0.0/16 tcp dport 443 accept"));
+    }
+
+    @Test
+    void everyDroppedPacketIsCountedForFlowLogsBeforeThePolicyDrop() {
+        SecurityGroup group = new SecurityGroup();
+        group.setVpcId("vpc-1");
+        group.setOwnerId("000000000000");
+
+        String nft = SecurityGroupNftCompiler.compile(
+                endpoint("eni-a", "10.0.0.2", "172.17.0.2", group), List.of(), Map.of());
+
+        assertTrue(nft.contains("update @fl_rej4 { ip saddr . th sport . ip daddr . th dport . meta l4proto counter }"));
+        assertTrue(nft.contains("update @fl_rej6 { ip6 saddr . th sport . ip6 daddr . th dport . meta l4proto counter }"));
+        assertTrue(nft.contains("meta l4proto != { tcp, udp } update @fl_rej4 { ip saddr . 0 . ip daddr . 0 . meta l4proto counter }"));
+        assertTrue(nft.endsWith("add rule inet floci_sg egress jump fl_reject\n"));
+        assertTrue(nft.contains("add rule inet floci_sg ingress jump fl_reject\n"));
     }
 
     @Test

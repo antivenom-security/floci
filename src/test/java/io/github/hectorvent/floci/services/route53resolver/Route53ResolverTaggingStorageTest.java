@@ -38,7 +38,7 @@ class Route53ResolverTaggingStorageTest {
         return new Route53ResolverService(new InMemoryStorage<>(),
                 new AccountAwareStorageBackend<>(endpointDelegate, null, DEFAULT_ACCOUNT),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), tagStore,
-                objectMapper);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), objectMapper);
     }
 
     private InMemoryStorage<String, ObjectNode> legacyEndpointStore() {

@@ -92,7 +92,9 @@ recorded as an `eventVersion` 1.11 record:
   and `responseElements` the parsed output, in CloudTrail's casing. Members
   the model marks sensitive, and STS `credentials.sessionToken`, read
   `HIDDEN_DUE_TO_SECURITY_REASONS`.
-- `responseElements` is `null` for read-only calls and errors. A refused call,
+- `responseElements` is `null` for read-only calls and errors, except STS
+  `AssumeRole*`, `GetSessionToken` and `GetFederationToken`, which are
+  read-only and keep it. A refused call,
   an IAM denial included, carries `errorCode` and `errorMessage`.
 - `userIdentity` is `Root` for the `test` key and a 12-digit account key,
   `IAMUser`, `AssumedRole` with its `sessionContext`, `FederatedUser`, or
@@ -102,7 +104,7 @@ recorded as an `eventVersion` 1.11 record:
   with `trust-forwarded-for` on.
 
 Data events (S3 object operations, DynamoDB items, Lambda `Invoke`, SNS
-`Publish`, SQS messages) and CloudWatch Logs `PutLogEvents` are not
+`Publish`, SQS messages, Kinesis records) and CloudWatch Logs `PutLogEvents` are not
 management events and are not recorded here.
 
 AWS services' own role assumptions are recorded as `AssumeRole` with an
@@ -112,7 +114,9 @@ execution roles (`lambda.amazonaws.com`) and EC2 instance profile roles
 
 Each record goes to event history, which `LookupEvents` serves per account
 and region whether or not a trail exists, and to every logging trail whose
-selectors cover it. A trail with no selectors logs every management event.
+selectors cover it. A trail with no selectors logs every management event,
+and one with `IncludeGlobalServiceEvents` off skips global services' events.
+`PutEventSelectors` rejects an empty selector list.
 Basic selectors honor `IncludeManagementEvents`, `ReadWriteType` and
 `ExcludeManagementEventSources`; advanced selectors `eventCategory`,
 `readOnly` and `eventSource`.
@@ -130,8 +134,8 @@ Known gaps:
 - REST request headers and rest-xml bodies are not read into
   `requestParameters`, and rest-xml responses give no `responseElements`.
   S3 management events name the bucket `bucket`, not `bucketName`.
-- Global service events reach trails by region alone;
-  `IncludeGlobalServiceEvents` is not consulted.
+- A Query form `POST` without a `Content-Length` or over 256 KB is not
+  recorded, since naming its operation would buffer the body.
 - Lambda URL and Lambda Web execution roles are not recorded.
 
 ## S3 Hook Coverage
@@ -167,7 +171,7 @@ recorded as `PostObject` when IAM refuses it.
 | `FLOCI_SERVICES_CLOUDTRAIL_DIGEST_INTERVAL_SECONDS` | `3600` | How often a trail with log file validation writes a digest file, AWS's hourly |
 | `FLOCI_SERVICES_CLOUDTRAIL_MANAGEMENT_EVENTS_ENABLED` | `true` | Record management events into event history and trails |
 | `FLOCI_SERVICES_CLOUDTRAIL_EVENT_HISTORY_RETENTION_DAYS` | `90` | How long event history keeps an event |
-| `FLOCI_SERVICES_CLOUDTRAIL_EVENT_HISTORY_MAX_EVENTS` | `200000` | Event history size, across accounts and regions; the oldest events are evicted past it |
+| `FLOCI_SERVICES_CLOUDTRAIL_EVENT_HISTORY_MAX_EVENTS` | `20000` | Event history size, across accounts and regions; the oldest events are evicted past it |
 | `FLOCI_SERVICES_CLOUDTRAIL_LOOKUP_RATE_LIMIT_PER_SECOND` | `2` | `LookupEvents` calls allowed per second per account and region |
 | `FLOCI_SERVICES_CLOUDTRAIL_TRUST_FORWARDED_FOR` | `false` | Record the first `X-Forwarded-For` address as `sourceIPAddress` instead of the TCP peer |
 
