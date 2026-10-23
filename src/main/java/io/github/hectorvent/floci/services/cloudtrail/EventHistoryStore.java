@@ -24,6 +24,8 @@ import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Pattern;
 
 /**
@@ -39,7 +41,7 @@ public class EventHistoryStore {
             "ResourceType", "ResourceName", "EventSource", "AccessKeyId");
     private static final Pattern KEY = Pattern.compile("\\d{13}-\\d{12}");
 
-    private record Indexed(String key, String accountId, long eventTimeMillis) {
+    private record Indexed(String key, String accountId, String region, long eventTimeMillis) {
     }
 
     /** One LookupEvents page; {@code nextToken} is null on the last one. */
@@ -47,8 +49,12 @@ public class EventHistoryStore {
     }
 
     private final AccountAwareStorageBackend<HistoryEvent> store;
-    private final NavigableSet<Indexed> index = new TreeSet<>(
-            Comparator.comparing(Indexed::key).thenComparing(Indexed::accountId));
+    private static final Comparator<Indexed> ORDER = Comparator.comparing(Indexed::key)
+            .thenComparing(Indexed::accountId);
+
+    private final NavigableSet<Indexed> index = new TreeSet<>(ORDER);
+    private final Map<String, NavigableSet<Indexed>> byAccountRegion = new HashMap<>();
+    private final ReadWriteLock lock = new ReentrantReadWriteLock();
     private final Map<String, Deque<Long>> lookupTimes = new HashMap<>();
     private final Duration retention;
     private final int maxEvents;
@@ -63,11 +69,20 @@ public class EventHistoryStore {
         this.retention = Duration.ofDays(cloudtrail.eventHistory().retentionDays());
         this.maxEvents = cloudtrail.eventHistory().maxEvents();
         this.lookupRateLimit = cloudtrail.lookupRateLimitPerSecond();
-        store.scanAllAccountEntries(key -> true).forEach(entry ->
-                index.add(new Indexed(entry.key(), entry.accountId(), entry.value().eventTimeMillis())));
+        store.scanAllAccountEntries(key -> true).forEach(entry -> add(new Indexed(entry.key(), entry.accountId(),
+                entry.value().region(), entry.value().eventTimeMillis())));
     }
 
-    public synchronized void append(ObjectNode record) {
+    public void append(ObjectNode record) {
+        lock.writeLock().lock();
+        try {
+            appendLocked(record);
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    private void appendLocked(ObjectNode record) {
         long now = System.currentTimeMillis();
         String key = String.format("%013d-%012d", now, sequence++ % 1_000_000_000_000L);
         String accountId = record.path("recipientAccountId").asText();
@@ -77,16 +92,23 @@ public class EventHistoryStore {
                 record.path("userIdentity").path("accessKeyId").asText(null), username(record.path("userIdentity")),
                 resources(record), record.toString());
         store.putForAccount(accountId, key, event);
-        index.add(new Indexed(key, accountId, event.eventTimeMillis()));
+        add(new Indexed(key, accountId, event.region(), event.eventTimeMillis()));
         long cutoff = now - retention.toMillis();
         while (!index.isEmpty() && (index.size() > maxEvents || index.first().eventTimeMillis() < cutoff)) {
             Indexed oldest = index.pollFirst();
+            byAccountRegion.get(oldest.accountId() + "/" + oldest.region()).remove(oldest);
             store.deleteForAccount(oldest.accountId(), oldest.key());
         }
     }
 
-    public synchronized Page lookup(String accountId, String region, String attributeKey, String attributeValue,
-                                    Instant startTime, Instant endTime, Integer maxResults, String nextToken) {
+    private void add(Indexed indexed) {
+        index.add(indexed);
+        byAccountRegion.computeIfAbsent(indexed.accountId() + "/" + indexed.region(), k -> new TreeSet<>(ORDER))
+                .add(indexed);
+    }
+
+    public Page lookup(String accountId, String region, String attributeKey, String attributeValue,
+                       Instant startTime, Instant endTime, Integer maxResults, String nextToken) {
         throttle(accountId, region);
         if (attributeKey != null && !ATTRIBUTE_KEYS.contains(attributeKey)) {
             throw new AwsException("InvalidLookupAttributesException",
@@ -103,16 +125,26 @@ public class EventHistoryStore {
             throw new AwsException("InvalidNextTokenException", "Invalid NextToken.", 400);
         }
         int limit = maxResults == null ? MAX_RESULTS : maxResults;
-        NavigableSet<Indexed> newestFirst = nextToken == null ? index.descendingSet()
-                : index.headSet(new Indexed(nextToken, "", 0L), false).descendingSet();
+        long cutoff = System.currentTimeMillis() - retention.toMillis();
+        lock.readLock().lock();
+        try {
+            NavigableSet<Indexed> scope = byAccountRegion.getOrDefault(accountId + "/" + region, new TreeSet<>(ORDER));
+            NavigableSet<Indexed> newestFirst = nextToken == null ? scope.descendingSet()
+                    : scope.headSet(new Indexed(nextToken, "", "", 0L), false).descendingSet();
+            return page(newestFirst, accountId, attributeKey, attributeValue, startTime, endTime, limit, cutoff);
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    private Page page(NavigableSet<Indexed> newestFirst, String accountId, String attributeKey, String attributeValue,
+                      Instant startTime, Instant endTime, int limit, long cutoff) {
         List<HistoryEvent> events = new ArrayList<>();
         String lastKey = null;
         for (Indexed indexed : newestFirst) {
-            if (!indexed.accountId().equals(accountId)) {
-                continue;
-            }
-            HistoryEvent event = store.getForAccount(accountId, indexed.key()).orElse(null);
-            if (event == null || !event.region().equals(region)
+            HistoryEvent event = indexed.eventTimeMillis() < cutoff ? null
+                    : store.getForAccount(accountId, indexed.key()).orElse(null);
+            if (event == null
                     || (startTime != null && event.eventTimeMillis() < startTime.toEpochMilli())
                     || (endTime != null && event.eventTimeMillis() > endTime.toEpochMilli())
                     || (attributeKey != null && !matches(event, attributeKey, attributeValue))) {
@@ -127,7 +159,7 @@ public class EventHistoryStore {
         return new Page(events, null);
     }
 
-    private void throttle(String accountId, String region) {
+    private synchronized void throttle(String accountId, String region) {
         long now = System.currentTimeMillis();
         Deque<Long> times = lookupTimes.computeIfAbsent(accountId + "/" + region, k -> new ArrayDeque<>());
         while (!times.isEmpty() && times.peekFirst() <= now - 1000) {

@@ -150,6 +150,10 @@ public class CloudTrailJsonHandler {
             throw new AwsException("InvalidEventSelectorsException",
                     "EventSelectors and AdvancedEventSelectors are mutually exclusive on a single trail.", 400);
         }
+        if (!hasBasic && !hasAdvanced) {
+            throw new AwsException("InvalidEventSelectorsException",
+                    "Specify a valid number of event selectors (1 to 5) for a trail.", 400);
+        }
 
         ObjectNode resp = mapper.createObjectNode();
         Trail trail = trailName != null ? firstTrail(service.describeTrails(region, List.of(trailName))) : null;

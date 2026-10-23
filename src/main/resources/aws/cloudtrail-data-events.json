@@ -1,5 +1,5 @@
 {
-  "_source": "Hand-maintained. Operations CloudTrail never records as management events: data events (https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-data-events-with-cloudtrail.html, https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/logging-using-cloudtrail.html) and operations it does not log at all (absent from https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/logging_cw_api_calls.html).",
+  "_source": "Hand-maintained. Operations CloudTrail never records as management events: data events (https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-data-events-with-cloudtrail.html, https://docs.aws.amazon.com/streams/latest/dev/logging-using-cloudtrail.html, https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/logging-using-cloudtrail.html) and operations it does not log at all (absent from https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/logging_cw_api_calls.html).",
   "dataEvents": {
     "s3.amazonaws.com": [
       "AbortMultipartUpload", "CompleteMultipartUpload", "CopyObject", "CreateMultipartUpload",
@@ -17,6 +17,7 @@
       "TransactWriteItems", "UpdateItem"
     ],
     "lambda.amazonaws.com": ["Invoke", "InvokeWithResponseStream"],
+    "kinesis.amazonaws.com": ["PutRecord", "PutRecords", "GetRecords", "GetShardIterator", "SubscribeToShard"],
     "sns.amazonaws.com": ["Publish", "PublishBatch"],
     "sqs.amazonaws.com": [
       "SendMessage", "SendMessageBatch", "ReceiveMessage", "DeleteMessage", "DeleteMessageBatch",

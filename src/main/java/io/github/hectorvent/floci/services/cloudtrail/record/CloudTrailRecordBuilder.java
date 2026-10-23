@@ -50,8 +50,8 @@ public class CloudTrailRecordBuilder {
 
     private static final ObjectMapper TABLE_MAPPER = new ObjectMapper();
     private static final JsonNode DATA_EVENTS = table("aws/cloudtrail-data-events.json");
-    private static final JsonNode READ_ONLY_OVERRIDES = table("aws/cloudtrail-readonly-overrides.json")
-            .path("overrides");
+    private static final JsonNode READ_ONLY_TABLE = table("aws/cloudtrail-readonly-overrides.json");
+    private static final JsonNode READ_ONLY_OVERRIDES = READ_ONLY_TABLE.path("overrides");
     private static final JsonNode RESOURCES = table("aws/cloudtrail-resources.json");
     private static final JsonNode TIME_FORMATS = table("aws/cloudtrail-response-time-formats.json").path("formats");
     private static final JsonNode SENSITIVE_OVERRIDES = table("aws/cloudtrail-sensitive-overrides.json")
@@ -86,7 +86,8 @@ public class CloudTrailRecordBuilder {
         }
         putParameters(record, "requestParameters", event.requestParameters());
         putParameters(record, "responseElements",
-                readOnly || event.errorCode() != null ? null : event.responseElements());
+                (readOnly && !keepsResponse(event.eventSource(), event.eventName())) || event.errorCode() != null
+                        ? null : event.responseElements());
         if (event.additionalEventData() != null) {
             record.set("additionalEventData", event.additionalEventData());
         }
@@ -131,6 +132,11 @@ public class CloudTrailRecordBuilder {
         Rendering rendering = new Rendering(modelNode.path("shapes"), operation.eventSource(),
                 "query".equals(protocol) || "ec2".equals(protocol), "ec2".equals(protocol), output);
         return render(rendering, shape, value);
+    }
+
+    /** Whether a read-only operation's record still carries responseElements, as STS AssumeRole's does. */
+    public static boolean keepsResponse(String eventSource, String eventName) {
+        return contains(READ_ONLY_TABLE.path("responseKept").path(eventSource), eventName);
     }
 
     public static boolean isReadOnly(String eventSource, String eventName) {

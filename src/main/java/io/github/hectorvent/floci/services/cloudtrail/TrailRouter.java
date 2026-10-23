@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.cloudtrail;
 
+import io.github.hectorvent.floci.core.common.AwsPartition;
+import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedFieldSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
@@ -26,6 +29,14 @@ final class TrailRouter {
             return true;
         }
         return selectors.stream().anyMatch(selector -> matches(selector, eventSource, readOnly));
+    }
+
+    /** The signing region a global service (IAM, CloudFront) records in, or null for a regional one. */
+    static String globalSigningRegion(String eventSource, String region) {
+        return AwsPartitions.forRegionOrCommercial(region).globalEndpoint(ServicePrincipals.serviceName(eventSource))
+                .filter(endpoint -> !endpoint.regionalized())
+                .map(AwsPartition.GlobalEndpoint::signingRegion)
+                .orElse(null);
     }
 
     private static boolean matches(EventSelector selector, String eventSource, boolean readOnly) {
