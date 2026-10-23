@@ -64,7 +64,7 @@ class S3EventBridgeIntegrationTest {
             .body("""
                 {
                     "Name": "s3-event-rule",
-                    "EventPattern": "{\\"source\\":[\\"aws.s3\\"]}",
+                    "EventPattern": "{\\"source\\":[\\"aws.s3\\"],\\"detail-type\\":[{\\"anything-but\\":\\"AWS API Call via CloudTrail\\"}]}",
                     "State": "ENABLED"
                 }
                 """)
