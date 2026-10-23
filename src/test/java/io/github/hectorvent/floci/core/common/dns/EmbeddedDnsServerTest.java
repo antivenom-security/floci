@@ -4,6 +4,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.WorkerExecutor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -461,6 +462,44 @@ class EmbeddedDnsServerTest {
 
         assertEquals(3, parsed.responseCode());
         assertEquals(List.of(), parsed.answers());
+    }
+
+    @Test
+    void parseExchange_rendersTxtAndSoaAsText() {
+        byte[] query = buildQuery("txt.sapphire.internal", (short) 9);
+        DnsAnswer answer = DnsAnswer.typedRecords(List.of(new DnsRecord.Txt("\"v=spf1 -all\""),
+                new DnsRecord.Soa("ns.example. host.example. 1 7200 900 1209600 30")), 30);
+        byte[] response = dns.buildAResponse(query, (short) 9, 12, query.length, answer);
+
+        List<DnsQueryObserver.Answer> answers = EmbeddedDnsServer.parseExchange(Instant.EPOCH,
+                "10.0.0.5", 40000, response).answers();
+
+        assertEquals("\"v=spf1 -all\"", answers.get(0).data());
+        assertEquals("ns.example. host.example. 1 7200 900 1209600 30", answers.get(1).data());
+    }
+
+    @Test
+    @Timeout(30)
+    void observe_dropsAndCountsWhenObserversFallBehindInsteadOfQueueingForever() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        EmbeddedDnsServer observed = new EmbeddedDnsServer(List.of(), List.of(), List.of(), List.of(),
+                List.of(query -> {
+                    try {
+                        release.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }));
+        byte[] response = dns.buildEmptyResponse(buildQuery("a.sapphire.internal", (short) 1),
+                (short) 1, 12, buildQuery("a.sapphire.internal", (short) 1).length, 3);
+        try {
+            for (int i = 0; i < EmbeddedDnsServer.OBSERVER_QUEUE_SIZE + 10; i++) {
+                observed.observe(Instant.EPOCH, "10.0.0.5", 40000, response);
+            }
+            assertTrue(observed.droppedObservations() >= 9, "dropped " + observed.droppedObservations());
+        } finally {
+            release.countDown();
+        }
     }
 
     @Test

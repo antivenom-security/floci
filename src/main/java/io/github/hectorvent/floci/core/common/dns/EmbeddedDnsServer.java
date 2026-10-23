@@ -35,8 +35,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.SequencedSet;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -85,6 +89,7 @@ public class EmbeddedDnsServer {
     // shared worker pool that planQuery and the rest of the emulator also run on.
     private static final String FORWARD_POOL_NAME = "floci-dns-forward";
     private static final int FORWARD_POOL_SIZE = 8;
+    static final int OBSERVER_QUEUE_SIZE = 1024;
     public static final String DEFAULT_SUFFIX = "localhost.floci.io";
     public static final String LOCALSTACK_SUFFIX = "localhost.localstack.cloud";
     private static final Pattern EC2_PRIVATE_DNS_NAME =
@@ -108,6 +113,18 @@ public class EmbeddedDnsServer {
     private final Iterable<DnsForwardingRuleSource> forwardingRuleSources;
     private final Iterable<DnsClientVpcSource> clientVpcSources;
     private final Iterable<DnsQueryObserver> queryObservers;
+    private final AtomicLong droppedObservations = new AtomicLong();
+    private final ThreadPoolExecutor observerPool = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(OBSERVER_QUEUE_SIZE), runnable -> {
+                Thread thread = new Thread(runnable, "floci-dns-observer");
+                thread.setDaemon(true);
+                return thread;
+            }, (runnable, pool) -> {
+                if (droppedObservations.incrementAndGet() % OBSERVER_QUEUE_SIZE == 1) {
+                    LOG.warnv("DNS query observers are behind; dropped {0} answered queries so far",
+                            droppedObservations.get());
+                }
+            });
 
     EmbeddedDnsServer(List<String> suffixes) {
         this(suffixes, List.of());
@@ -246,7 +263,7 @@ public class EmbeddedDnsServer {
                                 ? buildAResponse(data, txId, questionOffset, questionEnd, records)
                                 : buildEmptyResponse(data, txId, questionOffset, questionEnd,
                                         records.nameExists() ? 0 : 3);
-                        reply(vertx, socket, response, senderHost, senderPort);
+                        reply(socket, response, senderHost, senderPort);
                     })
                     .onFailure(e -> LOG.warnv("DNS record lookup failed for {0}: {1}", qname, e.getMessage()));
         } catch (Exception e) {
@@ -254,25 +271,35 @@ public class EmbeddedDnsServer {
         }
     }
 
-    private void reply(Vertx vertx, DatagramSocket socket, byte[] response, String senderHost, int senderPort) {
+    private void reply(DatagramSocket socket, byte[] response, String senderHost, int senderPort) {
         socket.send(Buffer.buffer(response), senderPort, senderHost, v -> {});
         if (queryObservers == null || !queryObservers.iterator().hasNext()) {
             return;
         }
-        Instant answeredAt = Instant.now();
-        vertx.executeBlocking(() -> {
-            DnsQueryObserver.Query query = parseExchange(answeredAt, senderHost, senderPort, response);
-            for (DnsQueryObserver observer : queryObservers) {
-                try {
-                    observer.observe(query);
-                } catch (Exception e) {
-                    LOG.debugv("DNS query observer {0} failed for {1}: {2}",
-                            observer.getClass().getSimpleName(), query.name(), e.getMessage());
+        observe(Instant.now(), senderHost, senderPort, response);
+    }
+
+    /** Hands the exchange to the observers off the packet path; a full queue drops it rather than wait. */
+    void observe(Instant answeredAt, String senderHost, int senderPort, byte[] response) {
+        observerPool.execute(() -> {
+            try {
+                DnsQueryObserver.Query query = parseExchange(answeredAt, senderHost, senderPort, response);
+                for (DnsQueryObserver observer : queryObservers) {
+                    try {
+                        observer.observe(query);
+                    } catch (Exception e) {
+                        LOG.debugv("DNS query observer {0} failed for {1}: {2}",
+                                observer.getClass().getSimpleName(), query.name(), e.getMessage());
+                    }
                 }
+            } catch (RuntimeException e) {
+                LOG.debugv("Could not observe DNS response for {0}: {1}", senderHost, e.getMessage());
             }
-            return null;
-        }, false).onFailure(e -> LOG.debugv("Could not observe DNS response for {0}: {1}",
-                senderHost, e.getMessage()));
+        });
+    }
+
+    long droppedObservations() {
+        return droppedObservations.get();
     }
 
     /** The query and the answer the client received, both read from the response it was sent. */
@@ -310,11 +337,37 @@ public class EmbeddedDnsServer {
                 case 1, 28 -> InetAddress.getByAddress(Arrays.copyOfRange(message, start, start + length))
                         .getHostAddress();
                 case 2, 5, 12 -> readName(ByteBuffer.wrap(message).position(start), message) + ".";
+                case 15 -> Short.toUnsignedInt(ByteBuffer.wrap(message).getShort(start)) + " "
+                        + readName(ByteBuffer.wrap(message).position(start + 2), message) + ".";
+                case 16 -> txtData(message, start, length);
+                case 6 -> soaData(message, start);
                 default -> "\\# " + length + " " + HexFormat.of().formatHex(message, start, start + length);
             };
         } catch (IOException e) {
             return "\\# " + length;
         }
+    }
+
+    private static String txtData(byte[] message, int start, int length) {
+        List<String> strings = new ArrayList<>();
+        int position = start;
+        while (position < start + length) {
+            int size = message[position] & 0xFF;
+            strings.add("\"" + new String(message, position + 1, size, StandardCharsets.US_ASCII) + "\"");
+            position += 1 + size;
+        }
+        return String.join(" ", strings);
+    }
+
+    private static String soaData(byte[] message, int start) {
+        ByteBuffer buf = ByteBuffer.wrap(message).position(start);
+        String primary = readName(buf, message) + ".";
+        String mailbox = readName(buf, message) + ".";
+        StringBuilder data = new StringBuilder(primary).append(' ').append(mailbox);
+        for (int i = 0; i < 5; i++) {
+            data.append(' ').append(Integer.toUnsignedLong(buf.getInt()));
+        }
+        return data.toString();
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -712,7 +765,7 @@ public class EmbeddedDnsServer {
             return;
         }
         submitForward(forwardPool(vertx), () -> forwardToUpstreams(query, upstreams, DNS_PORT))
-                .onSuccess(response -> reply(vertx, socket, response, senderHost, senderPort))
+                .onSuccess(response -> reply(socket, response, senderHost, senderPort))
                 .onFailure(e ->
                         LOG.warnv("DNS forwarding failed on all upstreams {0}: {1}",
                                 upstreams, e.getMessage()));
@@ -732,11 +785,11 @@ public class EmbeddedDnsServer {
                                       List<DnsForwardingRule.Target> targets, String qname,
                                       short txId, int questionOffset, int questionEnd) {
         submitForward(forwardPool(vertx), () -> forwardToTargets(query, shuffled(targets)))
-                .onSuccess(response -> reply(vertx, socket, response, senderHost, senderPort))
+                .onSuccess(response -> reply(socket, response, senderHost, senderPort))
                 .onFailure(e -> {
                     LOG.warnv("Resolver rule forwarding for {0} failed on every target {1}: {2}",
                             qname, targets, e.getMessage());
-                    reply(vertx, socket, buildServerFailureResponse(query, txId, questionOffset, questionEnd),
+                    reply(socket, buildServerFailureResponse(query, txId, questionOffset, questionEnd),
                             senderHost, senderPort);
                 });
     }
