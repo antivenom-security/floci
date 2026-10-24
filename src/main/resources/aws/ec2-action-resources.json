@@ -1,0 +1,114 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_iam_action_resources.py --service ec2",
+    "reference": "https://servicereference.us-east-1.amazonaws.com/v1/ec2/ec2.json",
+    "retrieved": "2026-10-24",
+    "note": "make ec2-action-resources-verify checks every entry against AWS."
+  },
+  "actionResources": {
+    "ApplySecurityGroupsToClientVpnTargetNetwork": [
+      "security-group"
+    ],
+    "AssociateSecurityGroupVpc": [
+      "security-group"
+    ],
+    "AttachClassicLinkVpc": [
+      "security-group"
+    ],
+    "AuthorizeSecurityGroupEgress": [
+      "security-group"
+    ],
+    "AuthorizeSecurityGroupIngress": [
+      "security-group"
+    ],
+    "CreateApplicationStatusCheck": [
+      "security-group"
+    ],
+    "CreateClientVpnEndpoint": [
+      "security-group"
+    ],
+    "CreateInstanceConnectEndpoint": [
+      "security-group"
+    ],
+    "CreateNetworkInterface": [
+      "security-group"
+    ],
+    "CreateSecurityGroup": [
+      "security-group"
+    ],
+    "CreateTags": [
+      "security-group"
+    ],
+    "CreateVerifiedAccessEndpoint": [
+      "security-group"
+    ],
+    "CreateVpcEndpoint": [
+      "security-group"
+    ],
+    "DeleteSecurityGroup": [
+      "security-group"
+    ],
+    "DeleteTags": [
+      "security-group"
+    ],
+    "DescribeSecurityGroupReferences": [
+      "security-group"
+    ],
+    "DisassociateSecurityGroupVpc": [
+      "security-group"
+    ],
+    "ImportInstance": [
+      "security-group"
+    ],
+    "ModifyApplicationStatusCheck": [
+      "security-group"
+    ],
+    "ModifyClientVpnEndpoint": [
+      "security-group"
+    ],
+    "ModifyInstanceAttribute": [
+      "security-group"
+    ],
+    "ModifyInstanceConnectEndpoint": [
+      "security-group"
+    ],
+    "ModifyNetworkInterfaceAttribute": [
+      "security-group"
+    ],
+    "ModifySecurityGroupRules": [
+      "security-group"
+    ],
+    "ModifyVpcEndpoint": [
+      "security-group"
+    ],
+    "RequestSpotFleet": [
+      "security-group"
+    ],
+    "RequestSpotInstances": [
+      "security-group"
+    ],
+    "RevokeSecurityGroupEgress": [
+      "security-group"
+    ],
+    "RevokeSecurityGroupIngress": [
+      "security-group"
+    ],
+    "RunInstances": [
+      "security-group"
+    ],
+    "UpdateSecurityGroupRuleDescriptionsEgress": [
+      "security-group"
+    ],
+    "UpdateSecurityGroupRuleDescriptionsIngress": [
+      "security-group"
+    ],
+    "ValidateSecurityGroupQuotasForInterface": [
+      "security-group"
+    ]
+  },
+  "resourceArnFormats": {
+    "security-group": [
+      "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}"
+    ]
+  }
+}

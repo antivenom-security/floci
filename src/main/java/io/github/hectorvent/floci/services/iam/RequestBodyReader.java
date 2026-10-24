@@ -12,6 +12,9 @@ import java.io.InputStream;
 import java.net.URLDecoder;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 public final class RequestBodyReader {
 
@@ -69,6 +72,41 @@ public final class RequestBodyReader {
             return eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), charset);
         }
         return null;
+    }
+
+    /**
+     * Every form field of a Query request, in the order sent, read from the same place
+     * {@link #formField} reads one: the query string of a Query GET, the url-encoded body otherwise.
+     * Empty for any other request.
+     */
+    static List<Map.Entry<String, String>> formFields(ContainerRequestContext ctx) {
+        List<Map.Entry<String, String>> fields = new ArrayList<>();
+        if ("GET".equalsIgnoreCase(ctx.getMethod()) && IamActionRegistry.isQueryRequest(ctx)) {
+            ctx.getUriInfo().getQueryParameters().forEach((key, values) ->
+                    values.forEach(value -> fields.add(Map.entry(key, value))));
+            return fields;
+        }
+        MediaType mt = ctx.getMediaType();
+        if (mt == null
+                || !"application".equalsIgnoreCase(mt.getType())
+                || !"x-www-form-urlencoded".equalsIgnoreCase(mt.getSubtype())) {
+            return fields;
+        }
+        byte[] body = buffer(ctx);
+        if (body.length == 0) {
+            return fields;
+        }
+        Charset charset = resolveCharset(mt);
+        for (String pair : new String(body, charset).split("&")) {
+            if (pair.isEmpty()) {
+                continue;
+            }
+            int eq = pair.indexOf('=');
+            String key = URLDecoder.decode(eq < 0 ? pair : pair.substring(0, eq), charset);
+            String value = eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), charset);
+            fields.add(Map.entry(key, value));
+        }
+        return fields;
     }
 
     static String jsonField(ContainerRequestContext ctx, ObjectMapper objectMapper, String key) {

@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
@@ -31,7 +33,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Constructs the target resource ARN for a request so the policy evaluator
@@ -68,15 +73,28 @@ public class ResourceArnBuilder {
     private final Instance<SecretsManagerService> secretsManagerService;
     /** Looked up lazily for the same reason, to read the image a MicroVM runs. */
     private final Instance<LambdaMicrovmsService> microvmsService;
+    /** Looked up lazily for the same reason, to find the ECS resource a request acts on. */
+    private final Instance<EcsService> ecsService;
+    /** Looked up lazily for the same reason, to read the groups a launch template gives an instance. */
+    private final Instance<Ec2Service> ec2Service;
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
                               Instance<SecretsManagerService> secretsManagerService,
-                              Instance<LambdaMicrovmsService> microvmsService) {
+                              Instance<LambdaMicrovmsService> microvmsService,
+                              Instance<EcsService> ecsService, Instance<Ec2Service> ec2Service) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
         this.secretsManagerService = secretsManagerService;
         this.microvmsService = microvmsService;
+        this.ecsService = ecsService;
+        this.ec2Service = ec2Service;
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              Instance<SecretsManagerService> secretsManagerService,
+                              Instance<LambdaMicrovmsService> microvmsService) {
+        this(objectMapper, iamService, secretsManagerService, microvmsService, null, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -131,6 +149,8 @@ public class ResourceArnBuilder {
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
             case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
+            case "ecs"            -> buildEcsArns(ctx, region, accountId, partition);
+            case "ec2"            -> buildEc2Arns(ctx, region, accountId, partition);
             default               -> List.of("*");
         };
     }
@@ -647,6 +667,506 @@ public class ResourceArnBuilder {
             default -> Optional.empty();
         };
         return stored.filter(entity -> entity.arn() != null && !entity.arn().isBlank());
+    }
+
+    // ── ECS ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * The ECS actions whose target the request carries as an ARN, and the member holding it.
+     * Passed through, as IAM's ARN-carrying actions are: these are also the actions AWS gives
+     * every taggable type, so the ARN is what says which one the request names.
+     */
+    static final Map<String, String> ECS_ARN_PARAMETERS = Map.of(
+            "TagResource", "resourceArn",
+            "UntagResource", "resourceArn",
+            "ListTagsForResource", "resourceArn");
+
+    /**
+     * How each ECS resource type is read out of a request body, per type, as IAM's
+     * {@link #NAME_PARAMETERS} is. Which types an action is authorized against comes from the
+     * vendored {@code aws/ecs-action-resources.json}; the member a type arrives in depends on the
+     * action, so each resolver is handed the action too. A type absent from the body contributes
+     * nothing, and a request naming nothing at all is evaluated against {@code *}.
+     */
+    static final Map<String, EcsTypeResolver> ECS_TYPE_RESOLVERS = Map.of(
+            "cluster", ResourceArnBuilder::ecsClusterArns,
+            "service", ResourceArnBuilder::ecsServiceArns,
+            "task", ResourceArnBuilder::ecsTaskArns,
+            "task-definition", ResourceArnBuilder::ecsTaskDefinitionArns,
+            "container-instance", ResourceArnBuilder::ecsContainerInstanceArns,
+            "capacity-provider", ResourceArnBuilder::ecsCapacityProviderArns,
+            "task-set", ResourceArnBuilder::ecsTaskSetArns,
+            "service-deployment", (self, action, body, scope) -> ecsArnsIn(body, "serviceDeploymentArns"),
+            "service-revision", (self, action, body, scope) -> ecsArnsIn(body, "serviceRevisionArns"));
+
+    /**
+     * The ECS resource types the reference gives only to actions {@code EcsJsonHandler} does not
+     * dispatch, with why, besides the tagging actions, which pass their ARN through whatever type
+     * it names. Held to the claim by {@code EcsUnresolvedResourceTypesIntegrationTest}, as
+     * {@link #UNRESOLVED_TYPES} is for IAM.
+     */
+    static final Map<String, String> ECS_UNRESOLVED_TYPES = Map.of(
+            "daemon", "the daemon actions are not dispatched",
+            "daemon-deployment", "the daemon actions are not dispatched",
+            "daemon-revision", "the daemon actions are not dispatched",
+            "daemon-task-definition", "the daemon task definition actions are not dispatched",
+            "gateway", "the gateway actions are not dispatched",
+            "gateway-route", "the gateway actions are not dispatched");
+
+    /** How one of {@link #ECS_TYPE_RESOLVERS} reads its resources out of an ECS request body. */
+    interface EcsTypeResolver {
+        List<String> resolve(ResourceArnBuilder self, String action, JsonNode body, EcsScope scope);
+    }
+
+    /** Where a minted ECS ARN lives: the request's partition, Region and account. */
+    record EcsScope(String partition, String region, String accountId) {
+        String arn(String resource) {
+            return new AwsArnUtils.Arn(partition, "ecs", region, accountId, resource).toString();
+        }
+    }
+
+    /**
+     * The ECS resources a request is authorized against, which are the ones the handler will act
+     * on: each reference is resolved through the same {@link EcsService} lookup the handler uses,
+     * and the stored resource's ARN is what is checked. A request naming no cluster acts on
+     * {@link EcsService#DEFAULT_CLUSTER}. A resource that does not exist is authorized against
+     * the ARN the request names, kept in its own partition, Region and account, or one minted from
+     * its name, never {@code *}, so a deny on it still matches before the handler answers that it
+     * is not there.
+     */
+    private List<String> buildEcsArns(ContainerRequestContext ctx, String region, String accountId,
+                                      String partition) {
+        String target = ctx.getHeaderString("X-Amz-Target");
+        if (target == null || !target.contains(".")) {
+            return List.of("*");
+        }
+        String action = target.substring(target.lastIndexOf('.') + 1);
+        JsonNode body = readJsonBody(ctx);
+        if (body == null || !body.isObject()) {
+            body = objectMapper.createObjectNode();
+        }
+        String arnParameter = ECS_ARN_PARAMETERS.get(action);
+        if (arnParameter != null) {
+            String arn = nodeText(body.path(arnParameter));
+            return AwsArnUtils.isArn(arn) ? List.of(arn) : List.of("*");
+        }
+        EcsScope scope = new EcsScope(partition, region, accountId);
+        Set<String> arns = new LinkedHashSet<>();
+        for (String resourceType : IamActionResources.forService("ecs").typesOf(action)) {
+            EcsTypeResolver resolver = ECS_TYPE_RESOLVERS.get(resourceType);
+            if (resolver != null) {
+                arns.addAll(resolver.resolve(this, action, body, scope));
+            }
+        }
+        return arns.isEmpty() ? List.of("*") : List.copyOf(arns);
+    }
+
+    private List<String> ecsClusterArns(String action, JsonNode body, EcsScope scope) {
+        return switch (action) {
+            case "CreateCluster" -> List.of(scope.arn("cluster/" + ecsClusterName(text(body, "clusterName"))));
+            case "DescribeClusters" -> {
+                List<String> clusters = texts(body, "clusters");
+                if (clusters.isEmpty()) {
+                    yield List.of(ecsClusterArn(null, scope));
+                }
+                yield clusters.stream().map(cluster -> ecsClusterArn(cluster, scope)).toList();
+            }
+            default -> List.of(ecsClusterArn(text(body, "cluster"), scope));
+        };
+    }
+
+    private List<String> ecsServiceArns(String action, JsonNode body, EcsScope scope) {
+        String clusterRef = text(body, "cluster");
+        return switch (action) {
+            case "CreateService" -> {
+                String name = text(body, "serviceName");
+                yield name == null ? List.of()
+                        : List.of(scope.arn("service/" + ecsClusterNameIn(clusterRef, scope) + "/" + name));
+            }
+            case "UpdateService", "DeleteService" -> {
+                // These act on the request's cluster and the name after the reference's last '/',
+                // whatever cluster or Region a service ARN names, so that is what is authorized.
+                String service = text(body, "service");
+                if (service == null) {
+                    yield List.of();
+                }
+                yield List.of(storedEcs(ecs -> ecs.storedServiceArnByName(clusterRef, service, scope.region()))
+                        .orElseGet(() -> scope.arn("service/" + ecsClusterNameIn(clusterRef, scope) + "/"
+                                + service.substring(service.lastIndexOf('/') + 1))));
+            }
+            case "DescribeServices" -> texts(body, "services").stream()
+                    .map(service -> ecsServiceArn(clusterRef, service, scope)).toList();
+            case "DescribeServiceDeployments" -> ecsParentServiceArns(body, "serviceDeploymentArns", scope,
+                    EcsService::storedDeploymentServiceArn);
+            case "DescribeServiceRevisions" -> ecsParentServiceArns(body, "serviceRevisionArns", scope,
+                    EcsService::storedRevisionServiceArn);
+            default -> {
+                String service = text(body, "service");
+                yield service == null ? List.of() : List.of(ecsServiceArn(clusterRef, service, scope));
+            }
+        };
+    }
+
+    private List<String> ecsTaskArns(String action, JsonNode body, EcsScope scope) {
+        String clusterRef = text(body, "cluster");
+        List<String> tasks = new ArrayList<>();
+        String task = text(body, "task");
+        if (task != null) {
+            tasks.add(task);
+        }
+        tasks.addAll(texts(body, "tasks"));
+        // A task is found by its ARN or trailing id in any cluster and Region, so the stored task
+        // is the resource, not one minted under whatever cluster the request names.
+        return tasks.stream()
+                .map(ref -> storedEcs(ecs -> ecs.storedTaskArn(ref, scope.region()))
+                        .orElseGet(() -> ecsGivenOrMinted("task", ref, clusterRef, scope)))
+                .toList();
+    }
+
+    private List<String> ecsTaskDefinitionArns(String action, JsonNode body, EcsScope scope) {
+        return switch (action) {
+            case "RegisterTaskDefinition" -> {
+                String family = text(body, "family");
+                if (family == null) {
+                    yield List.of();
+                }
+                // A registration names a revision that does not exist yet, so it is minted as the
+                // one the registration would make, the way an IAM create is minted from its request.
+                String revision = ecsService == null || !ecsService.isResolvable() ? "*"
+                        : String.valueOf(ecsService.get().nextTaskDefinitionRevision(family, scope.region()));
+                yield List.of(scope.arn("task-definition/" + family + ":" + revision));
+            }
+            case "DeleteTaskDefinitions" -> texts(body, "taskDefinitions").stream()
+                    .map(ref -> ecsTaskDefinitionArn(ref, scope)).toList();
+            default -> {
+                String ref = text(body, "taskDefinition");
+                yield ref == null ? List.of() : List.of(ecsTaskDefinitionArn(ref, scope));
+            }
+        };
+    }
+
+    private List<String> ecsContainerInstanceArns(String action, JsonNode body, EcsScope scope) {
+        String clusterRef = text(body, "cluster");
+        List<String> refs = new ArrayList<>();
+        if ("PutAttributes".equals(action) || "DeleteAttributes".equals(action)) {
+            for (JsonNode attribute : body.path("attributes")) {
+                String targetType = nodeText(attribute.path("targetType"));
+                String targetId = nodeText(attribute.path("targetId"));
+                if ((targetType.isEmpty() || "container-instance".equals(targetType)) && !targetId.isBlank()) {
+                    refs.add(targetId);
+                }
+            }
+        } else {
+            String instance = text(body, "containerInstance");
+            if (instance != null) {
+                refs.add(instance);
+            }
+            refs.addAll(texts(body, "containerInstances"));
+        }
+        return refs.stream()
+                .map(ref -> storedEcs(ecs -> ecs.storedContainerInstanceArn(clusterRef, ref, scope.region()))
+                        .orElseGet(() -> ecsGivenOrMinted("container-instance", ref, clusterRef, scope)))
+                .toList();
+    }
+
+    private List<String> ecsCapacityProviderArns(String action, JsonNode body, EcsScope scope) {
+        if ("CreateCapacityProvider".equals(action)) {
+            String name = text(body, "name");
+            return name == null ? List.of() : List.of(scope.arn("capacity-provider/" + name));
+        }
+        List<String> refs = switch (action) {
+            case "DeleteCapacityProvider" -> optional(text(body, "capacityProvider"));
+            case "DescribeCapacityProviders" -> texts(body, "capacityProviders");
+            default -> optional(text(body, "name"));
+        };
+        return refs.stream()
+                .map(ref -> storedEcs(ecs -> ecs.storedCapacityProviderArn(ref))
+                        .orElseGet(() -> AwsArnUtils.isArnFor(ref, "ecs") ? ref
+                                : scope.arn("capacity-provider/" + ref)))
+                .toList();
+    }
+
+    private List<String> ecsTaskSetArns(String action, JsonNode body, EcsScope scope) {
+        String clusterRef = text(body, "cluster");
+        String service = text(body, "service");
+        if (service == null) {
+            return List.of();
+        }
+        String prefix = ecsTaskSetPrefix(ecsServiceArn(clusterRef, service, scope), clusterRef, scope);
+        List<String> taskSets = switch (action) {
+            // A create names a task set whose id ECS has yet to assign, as CreateSecurityGroup does,
+            // and a describe naming none asks about every one the service has.
+            case "CreateTaskSet" -> List.of("*");
+            case "DescribeTaskSets" -> {
+                List<String> named = texts(body, "taskSets");
+                yield named.isEmpty() ? List.of("*") : named;
+            }
+            default -> optional(text(body, "taskSet"));
+        };
+        return taskSets.stream()
+                .map(taskSet -> "*".equals(taskSet) ? prefix + "/*"
+                        : storedEcs(ecs -> ecs.storedTaskSetArn(clusterRef, service, taskSet, scope.region()))
+                                .orElseGet(() -> AwsArnUtils.isArnFor(taskSet, "ecs") ? taskSet
+                                        : prefix + "/" + taskSet))
+                .toList();
+    }
+
+    /**
+     * The services a list of deployment or revision ARNs belongs to: the stored one when the ARN
+     * names a stored deployment or revision, otherwise the {@code <type>/<cluster>/<service>/<id>}
+     * ARN's own parent, in that ARN's partition, Region and account.
+     */
+    private List<String> ecsParentServiceArns(JsonNode body, String field, EcsScope scope,
+                                              BiFunction<EcsService, String, Optional<String>> stored) {
+        List<String> services = new ArrayList<>();
+        for (String arn : ecsArnsIn(body, field)) {
+            Optional<String> storedService = storedEcs(ecs -> stored.apply(ecs, arn));
+            if (storedService.isPresent()) {
+                services.add(storedService.get());
+                continue;
+            }
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            String[] segments = parsed.resource().split("/");
+            if (segments.length >= 3) {
+                services.add(new AwsArnUtils.Arn(parsed.partition(), "ecs", parsed.region(), parsed.accountId(),
+                        "service/" + segments[1] + "/" + segments[2]).toString());
+            }
+        }
+        return services;
+    }
+
+    /** The ECS ARNs a list member carries, as given. */
+    private static List<String> ecsArnsIn(JsonNode body, String field) {
+        return texts(body, field).stream().filter(arn -> AwsArnUtils.isArnFor(arn, "ecs")).toList();
+    }
+
+    /**
+     * The cluster a reference names, as the handlers find it: the stored cluster by name in the
+     * request's Region or by ARN in any, the default one when it names none. A cluster that is
+     * not there is its ARN as given, or one minted from its name.
+     */
+    private String ecsClusterArn(String clusterRef, EcsScope scope) {
+        return storedEcs(ecs -> ecs.storedClusterArn(clusterRef, scope.region()))
+                .orElseGet(() -> clusterRef != null && AwsArnUtils.isArnFor(clusterRef, "ecs") ? clusterRef
+                        : scope.arn("cluster/" + ecsClusterName(clusterRef)));
+    }
+
+    /** The name of the cluster a request acts in: the stored cluster's, or the name it gives. */
+    private String ecsClusterNameIn(String clusterRef, EcsScope scope) {
+        return storedEcs(ecs -> ecs.storedClusterArn(clusterRef, scope.region()))
+                .map(ResourceArnBuilder::ecsClusterName)
+                .orElseGet(() -> ecsClusterName(clusterRef));
+    }
+
+    /**
+     * The service a reference names, as {@code resolveService} finds it: in the request's
+     * cluster, then by ARN or name in any. A service that is not there is its ARN as given, or one
+     * minted under the request's cluster.
+     */
+    private String ecsServiceArn(String clusterRef, String serviceRef, EcsScope scope) {
+        return storedEcs(ecs -> ecs.storedServiceArn(clusterRef, serviceRef, scope.region()))
+                .orElseGet(() -> ecsGivenOrMinted("service", serviceRef, clusterRef, scope));
+    }
+
+    /** A resource's ARN as given when it is one, kept in its own partition, Region and account; otherwise minted under the request's cluster. */
+    private String ecsGivenOrMinted(String resourceType, String ref, String clusterRef, EcsScope scope) {
+        if (AwsArnUtils.isArnFor(ref, "ecs")) {
+            return ref;
+        }
+        return scope.arn(resourceType + "/" + ecsClusterNameIn(clusterRef, scope) + "/" + ref);
+    }
+
+    /** {@code task-set/<cluster>/<service>} beside a service ARN, in that ARN's partition, Region and account. */
+    private String ecsTaskSetPrefix(String serviceArn, String clusterRef, EcsScope scope) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(serviceArn);
+        String[] segments = parsed.resource().split("/");
+        String path = segments.length >= 3 ? segments[1] + "/" + segments[2]
+                : ecsClusterNameIn(clusterRef, scope) + "/" + segments[segments.length - 1];
+        return new AwsArnUtils.Arn(parsed.partition(), "ecs", parsed.region(), parsed.accountId(),
+                "task-set/" + path).toString();
+    }
+
+    /**
+     * The task definition a reference names, as every launch and lookup finds it: the stored
+     * definition a {@code family:revision}, an ARN or a bare family resolves to. One that is not
+     * there is its ARN as given, its {@code family:revision}, or {@code family:*} for a bare family,
+     * the caller's naming, so a deny over the family still matches.
+     */
+    private String ecsTaskDefinitionArn(String ref, EcsScope scope) {
+        Optional<String> stored = storedEcs(ecs -> ecs.storedTaskDefinitionArn(ref, scope.region()));
+        if (stored.isPresent()) {
+            return stored.get();
+        }
+        if (AwsArnUtils.isArnFor(ref, "ecs")) {
+            return ref;
+        }
+        return scope.arn("task-definition/" + (ref.contains(":") ? ref : ref + ":*"));
+    }
+
+    /** A lookup against the ECS store, or empty when the builder has none to read. */
+    private Optional<String> storedEcs(Function<EcsService, Optional<String>> lookup) {
+        return ecsService == null || !ecsService.isResolvable() ? Optional.empty() : lookup.apply(ecsService.get());
+    }
+
+    private static String ecsClusterName(String ref) {
+        if (ref == null) {
+            return EcsService.DEFAULT_CLUSTER;
+        }
+        return AwsArnUtils.resourceIfArnFor(ref, "ecs")
+                .filter(resource -> resource.startsWith("cluster/"))
+                .map(resource -> resource.substring("cluster/".length()))
+                .orElse(ref);
+    }
+
+    private static String text(JsonNode body, String field) {
+        String value = nodeText(body.path(field));
+        return value.isBlank() ? null : value;
+    }
+
+    private static List<String> texts(JsonNode body, String field) {
+        List<String> values = new ArrayList<>();
+        for (JsonNode value : body.path(field)) {
+            String text = nodeText(value);
+            if (!text.isBlank()) {
+                values.add(text);
+            }
+        }
+        return values;
+    }
+
+    /**
+     * A member as {@code EcsJsonHandler} reads it, with {@code asText()}: a JSON {@code null} is the
+     * string {@code "null"}, which the handler then looks up, and a missing member is empty.
+     */
+    private static String nodeText(JsonNode node) {
+        return node.isNull() ? "null" : node.asText("");
+    }
+
+    private static List<String> optional(String value) {
+        return value == null ? List.of() : List.of(value);
+    }
+
+    // ── EC2 security groups ─────────────────────────────────────────────────────
+
+    /**
+     * The EC2 actions that act on a security group and on nothing else AWS checks, so the groups
+     * they name are their whole resource. Every other action in {@code aws/ec2-action-resources.json}
+     * is authorized by AWS against other types as well (an instance, a network interface, an
+     * endpoint, a VPC, a prefix list), which that file does not vendor, so those keep {@code *}
+     * beside the groups they name: a deny on a group binds, and an allow on the group alone does
+     * not grant them.
+     */
+    static final Set<String> EC2_GROUP_ONLY_ACTIONS = Set.of(
+            "AuthorizeSecurityGroupEgress", "AuthorizeSecurityGroupIngress",
+            "RevokeSecurityGroupEgress", "RevokeSecurityGroupIngress",
+            "DeleteSecurityGroup",
+            "UpdateSecurityGroupRuleDescriptionsEgress", "UpdateSecurityGroupRuleDescriptionsIngress",
+            "DescribeSecurityGroupReferences");
+
+    /**
+     * The Query members, list indices written as {@code N}, in which {@code Ec2QueryHandler}
+     * reads the security groups each dispatched action acts on, so the groups authorized are the
+     * groups the handler uses. Read exactly rather than by suffix: {@code IpPermissions.N.Groups.N.GroupId}
+     * names the group a rule refers to, which is not a resource the call acts on. An action not
+     * listed reads its groups from {@code GroupId} and {@code GroupId.N}, as AWS's own model has
+     * the actions Floci does not dispatch.
+     */
+    static final Map<String, Set<String>> EC2_GROUP_MEMBERS = Map.of(
+            "RunInstances", Set.of("SecurityGroupId.N", "NetworkInterface.N.SecurityGroupId.N"),
+            "CreateNetworkInterface", Set.of("SecurityGroupId.N", "Groups.SecurityGroupId.N"),
+            "CreateVpcEndpoint", Set.of("SecurityGroupId.N"),
+            "ModifyVpcEndpoint", Set.of("AddSecurityGroupId.N", "RemoveSecurityGroupId.N"),
+            "RequestSpotInstances", Set.of("LaunchSpecification.SecurityGroupId.N",
+                    "LaunchSpecification.NetworkInterface.N.SecurityGroupId.N"),
+            "ModifyInstanceAttribute", Set.of("GroupId.N"),
+            "ModifyNetworkInterfaceAttribute", Set.of("SecurityGroupId.N"),
+            "CreateTags", Set.of(),
+            "DeleteTags", Set.of());
+
+    private static final Set<String> EC2_DEFAULT_GROUP_MEMBERS = Set.of("GroupId", "GroupId.N");
+
+    private static final Pattern QUERY_LIST_INDEX = Pattern.compile("\\.\\d+(?=\\.|$)");
+
+    /**
+     * The security groups an EC2 request names, for the actions AWS authorizes against a security
+     * group. {@code CreateSecurityGroup} is authorized against {@code security-group/*}, the group's
+     * id not existing yet, the tagging actions against each {@code sg-} resource they name, and a
+     * {@code RunInstances} naming no group against the groups its launch template gives it, as the
+     * handler launches with them. An action naming no group stays on {@code *}, as does every
+     * action outside the vendored map.
+     */
+    private List<String> buildEc2Arns(ContainerRequestContext ctx, String region, String accountId,
+                                      String partition) {
+        String action = AwsQueryServiceResolver.action(
+                RequestBodyReader.formField(ctx, "Action"),
+                RequestBodyReader.formField(ctx, "Operation"));
+        if (action == null || !IamActionResources.forService("ec2").typesOf(action).contains("security-group")) {
+            return List.of("*");
+        }
+        Set<String> arns = new LinkedHashSet<>();
+        if ("CreateSecurityGroup".equals(action)) {
+            arns.add(securityGroupArn("*", region, accountId, partition));
+        }
+        boolean tagging = "CreateTags".equals(action) || "DeleteTags".equals(action);
+        Set<String> members = EC2_GROUP_MEMBERS.getOrDefault(action, EC2_DEFAULT_GROUP_MEMBERS);
+        String groupName = null;
+        Map<String, String> launchTemplate = new LinkedHashMap<>();
+        for (Map.Entry<String, String> field : RequestBodyReader.formFields(ctx)) {
+            String member = QUERY_LIST_INDEX.matcher(field.getKey()).replaceAll(".N");
+            String value = field.getValue();
+            if (value == null || value.isBlank()) {
+                continue;
+            }
+            if (members.contains(member)
+                    || tagging && "ResourceId.N".equals(member) && value.startsWith("sg-")) {
+                arns.add(securityGroupArn(value, region, accountId, partition));
+            } else if ("GroupName".equals(member)) {
+                // The handler reads each single-valued member with getFirst, so the first wins here too.
+                if (groupName == null) {
+                    groupName = value;
+                }
+            } else if (member.startsWith("LaunchTemplate.")) {
+                launchTemplate.putIfAbsent(member, value);
+            }
+        }
+        if (arns.isEmpty() && groupName != null && "DeleteSecurityGroup".equals(action)) {
+            // The handler deletes the group its GroupName names when no GroupId is given, reading
+            // the name as the id, so the resource is read the same way.
+            arns.add(securityGroupArn(groupName, region, accountId, partition));
+        }
+        if (arns.isEmpty() && "RunInstances".equals(action) && !launchTemplate.isEmpty()) {
+            for (String groupId : launchTemplateGroups(launchTemplate, region)) {
+                arns.add(securityGroupArn(groupId, region, accountId, partition));
+            }
+        }
+        if (arns.isEmpty()) {
+            return List.of("*");
+        }
+        if (!EC2_GROUP_ONLY_ACTIONS.contains(action)) {
+            arns.add("*");
+        }
+        return List.copyOf(arns);
+    }
+
+    /**
+     * The groups a launch template gives a {@code RunInstances} that names none, read the way the
+     * handler reads them: the template version the request names, its own group ids, else those
+     * of its interfaces. Read without seeding or changing anything, since the call may yet be
+     * denied. Empty when there is no store to read or the template is not there, in which case
+     * the launch fails before it starts anything.
+     */
+    private List<String> launchTemplateGroups(Map<String, String> launchTemplate, String region) {
+        String id = launchTemplate.get("LaunchTemplate.LaunchTemplateId");
+        String name = launchTemplate.get("LaunchTemplate.LaunchTemplateName");
+        if (ec2Service == null || !ec2Service.isResolvable() || id == null && name == null) {
+            return List.of();
+        }
+        return ec2Service.get().launchTemplateSecurityGroupIds(region, id, name,
+                launchTemplate.get("LaunchTemplate.Version"));
+    }
+
+    private static String securityGroupArn(String groupId, String region, String accountId, String partition) {
+        return new AwsArnUtils.Arn(partition, "ec2", region, accountId, "security-group/" + groupId).toString();
     }
 
     // ── S3 ──────────────────────────────────────────────────────────────────────

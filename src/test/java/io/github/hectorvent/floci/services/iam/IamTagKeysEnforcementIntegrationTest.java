@@ -48,7 +48,7 @@ class IamTagKeysEnforcementIntegrationTest {
                 .formParam("Action", "CreateTags").formParam("ResourceId.1", id)
                 .formParam("Tag.1.Key", "Team").formParam("Tag.1.Value", "payments")
                 .formParam("Tag.2.Key", "Admin").formParam("Tag.2.Value", "true")
-                .post("/").then().statusCode(403).body(containsString("AccessDenied"));
+                .post("/").then().statusCode(403).body(containsString("UnauthorizedOperation"));
     }
 
     @Test

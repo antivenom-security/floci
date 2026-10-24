@@ -8805,6 +8805,38 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return data;
     }
 
+    /**
+     * The security groups a launch from this template version would use, as
+     * {@link LaunchTemplateData#effectiveSecurityGroupIds} gives them, found the way
+     * {@link #resolveLaunchTemplateData} finds them but without seeding the Region's defaults or
+     * back-filling the template's versions: it is read by IAM enforcement before the call is
+     * allowed, so it must leave nothing behind. Empty when the template or version is not there,
+     * in which case the launch fails anyway.
+     */
+    public List<String> launchTemplateSecurityGroupIds(String region, String id, String name, String version) {
+        LaunchTemplate launchTemplate;
+        try {
+            launchTemplate = findLaunchTemplate(region, id, name);
+        } catch (AwsException e) {
+            return List.of();
+        }
+        String candidate = version == null || version.isBlank() ? launchTemplate.getDefaultVersionNumber() : version;
+        String resolved = switch (candidate) {
+            case "$Latest" -> launchTemplate.getLatestVersionNumber();
+            case "$Default" -> launchTemplate.getDefaultVersionNumber();
+            default -> candidate;
+        };
+        LaunchTemplateData data = launchTemplate.getVersions().isEmpty()
+                ? (Objects.equals(resolved, launchTemplate.getLatestVersionNumber()) ? launchTemplate.getData() : null)
+                : launchTemplate.getVersions().get(resolved);
+        return data == null ? List.of() : new LaunchTemplateData(data).effectiveSecurityGroupIds();
+    }
+
+    /** Whether {@link #ensureDefaultResources} has seeded the account's Region, without seeding it. */
+    boolean defaultResourcesSeeded(String accountId, String region) {
+        return seededAccountRegions.contains(accountId + "::" + region);
+    }
+
     public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);

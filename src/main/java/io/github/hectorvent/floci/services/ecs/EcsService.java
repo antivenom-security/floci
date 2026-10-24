@@ -117,7 +117,8 @@ import java.util.stream.Stream;
 public class EcsService implements ContainerTeardown, ResourceProvider, Resettable, PassedRoleLookup {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
-    private static final String DEFAULT_CLUSTER = "default";
+    /** The cluster a request that names none acts on, which IAM enforcement authorizes it against too. */
+    public static final String DEFAULT_CLUSTER = "default";
 
     private final RegionResolver regionResolver;
     private final EcsContainerManager containerManager;
@@ -1300,6 +1301,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     public void persistTaskDefinition(TaskDefinition td) {
         storeTaskDefinition(td);
+    }
+
+    /** The revision {@link #registerTaskDefinition} would give the family's next registration. */
+    public int nextTaskDefinitionRevision(String family, String region) {
+        Integer latest = latestRevisions.get(familyKey(region, family));
+        return (latest != null ? latest : latestRevision(region, family)) + 1;
     }
 
     public TaskDefinition describeTaskDefinition(String taskDefinitionRef, String region) {
@@ -5783,6 +5790,113 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("TaskSetNotFoundException", "Task set not found: " + ref, 400);
         }
         return ts;
+    }
+
+    // ── Authorization lookups ─────────────────────────────────────────────────
+    //
+    // Read-only views of the resolution helpers above, for IAM enforcement: a request is authorized
+    // against the stored resource the handler will act on, which is the one these find. None of
+    // them creates anything, the default cluster included.
+
+    /**
+     * The cluster a request's {@code cluster} names, as {@link #resolveClusterOrDefault} reads it:
+     * by name in the request's Region or by ARN in any, the default cluster when it names none.
+     */
+    public Optional<String> storedClusterArn(String clusterRef, String region) {
+        return Optional.ofNullable(lookupClusterOrDefault(clusterRef, region)).map(EcsCluster::getClusterArn);
+    }
+
+    /**
+     * The task a reference names, as {@link #resolveTask} reads it: by ARN or by trailing id, in
+     * any cluster and Region, whatever cluster the request names.
+     */
+    public Optional<String> storedTaskArn(String taskRef, String region) {
+        return Optional.ofNullable(resolveTask(taskRef, region)).map(EcsTask::getTaskArn);
+    }
+
+    /**
+     * The service {@code UpdateService} and {@code DeleteService} act on: the request's cluster,
+     * or the default one, and the name after the reference's last {@code /}, in the request's
+     * Region. A service ARN naming another cluster does not move the call there.
+     */
+    public Optional<String> storedServiceArnByName(String clusterRef, String serviceRef, String region) {
+        String serviceName = extractServiceName(serviceRef);
+        return Optional.ofNullable(services.get(serviceKey(region, clusterNameOrDefault(clusterRef, region),
+                serviceName))).map(EcsServiceModel::getServiceArn);
+    }
+
+    /**
+     * The service every other action acts on, as {@link #resolveService} reads it: the request's
+     * cluster first, then any service with that ARN or name in any cluster and Region.
+     */
+    public Optional<String> storedServiceArn(String clusterRef, String serviceRef, String region) {
+        return Optional.ofNullable(resolveService(clusterNameOrDefault(clusterRef, region), serviceRef, region))
+                .map(EcsServiceModel::getServiceArn);
+    }
+
+    /**
+     * The task definition a reference names, as every launch and lookup reads it
+     * ({@link #findTaskDefinition}), a bare family included.
+     */
+    public Optional<String> storedTaskDefinitionArn(String ref, String region) {
+        return Optional.ofNullable(findTaskDefinition(ref, region)).map(TaskDefinition::getTaskDefinitionArn);
+    }
+
+    /** The container instance a reference names within the request's cluster, as {@link #resolveContainerInstance} reads it. */
+    public Optional<String> storedContainerInstanceArn(String clusterRef, String ref, String region) {
+        EcsCluster cluster = lookupClusterOrDefault(clusterRef, region);
+        if (cluster == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(resolveContainerInstance(cluster.getClusterArn(), ref))
+                .map(ContainerInstance::getContainerInstanceArn);
+    }
+
+    /** The capacity provider a name or ARN names, as {@link #resolveCapacityProviderOrThrow} reads it. */
+    public Optional<String> storedCapacityProviderArn(String nameOrArn) {
+        CapacityProvider cp = capacityProviders.get(nameOrArn);
+        if (cp == null) {
+            cp = capacityProviders.values().stream()
+                    .filter(p -> p.getCapacityProviderArn().equals(nameOrArn))
+                    .findFirst().orElse(null);
+        }
+        return Optional.ofNullable(cp).map(CapacityProvider::getCapacityProviderArn);
+    }
+
+    /** The task set a reference names within the service the request names, as {@link #resolveTaskSetOrThrow} reads it. */
+    public Optional<String> storedTaskSetArn(String clusterRef, String serviceRef, String taskSetRef, String region) {
+        EcsServiceModel svc = resolveService(clusterNameOrDefault(clusterRef, region), serviceRef, region);
+        if (svc == null) {
+            return Optional.empty();
+        }
+        return taskSets.values().stream()
+                .filter(t -> t.getServiceArn().equals(svc.getServiceArn()))
+                .filter(t -> t.getTaskSetArn().equals(taskSetRef) || t.getId().equals(taskSetRef))
+                .findFirst().map(TaskSet::getTaskSetArn);
+    }
+
+    /** The service a stored deployment belongs to, read by the deployment's ARN as {@link #describeServiceDeployments} does. */
+    public Optional<String> storedDeploymentServiceArn(String deploymentArn) {
+        return Optional.ofNullable(serviceDeployments.get(deploymentArn)).map(ServiceDeployment::getServiceArn);
+    }
+
+    /** The service a stored revision belongs to, read by the revision's ARN as {@link #describeServiceRevisions} does. */
+    public Optional<String> storedRevisionServiceArn(String revisionArn) {
+        return Optional.ofNullable(serviceRevisions.get(revisionArn)).map(ServiceRevision::getServiceArn);
+    }
+
+    /** {@link #resolveClusterOrDefault} without creating the default cluster: null when nothing is stored. */
+    private EcsCluster lookupClusterOrDefault(String clusterRef, String region) {
+        if (clusterRef == null || clusterRef.isBlank() || DEFAULT_CLUSTER.equals(clusterRef)) {
+            return clusters.get(clusterKey(region, DEFAULT_CLUSTER));
+        }
+        return resolveCluster(clusterRef, region);
+    }
+
+    /** The name of the cluster a request acts in, the default one when it names none or names one that is not there. */
+    private String clusterNameOrDefault(String clusterRef, String region) {
+        EcsCluster cluster = lookupClusterOrDefault(clusterRef, region);
+        return cluster != null ? cluster.getClusterName() : DEFAULT_CLUSTER;
     }
 
     // ── Key helpers ───────────────────────────────────────────────────────────
