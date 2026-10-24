@@ -1,8 +1,9 @@
 name: IAM Data Drift
 
-# Checks the three vendored files that come from AWS's live service reference rather than from a
+# Checks the vendored files that come from AWS's live service reference rather than from a
 # pinned dependency: the IAM service namespace list, the map of which resource each IAM action is
-# authorized against, and the map of operations AWS authorizes as an action of another name. That
+# authorized against (and its ECS and EC2 security-group counterparts), and the map of operations
+# AWS authorizes as an action of another name. That
 # needs the live service reference index, so unlike every other check here it can
 # fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
 # retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
@@ -29,6 +30,8 @@ on:
     paths:
       - 'src/main/resources/aws/iam-service-namespaces.json'
       - 'src/main/resources/aws/iam-action-resources.json'
+      - 'src/main/resources/aws/ecs-action-resources.json'
+      - 'src/main/resources/aws/ec2-action-resources.json'
       - 'tools/aws/regen_service_namespaces.py'
       - 'tools/aws/test_regen_service_namespaces.py'
       - 'tools/aws/regen_iam_action_resources.py'

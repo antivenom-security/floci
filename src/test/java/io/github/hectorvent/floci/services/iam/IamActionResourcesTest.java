@@ -173,6 +173,78 @@ class IamActionResourcesTest {
                  "resourceArnFormats":{"user":["arn:${Partition}:iam::${Account}:user/${Name}"]}}"""));
     }
 
+    @Test
+    void everyEcsResourceTypeIsOneTheResolverCoversOrDeclaresUnresolved() {
+        // ECS's half of the IAM check above: read off the resolver's own tables, so a type AWS
+        // adds fails here by name instead of quietly putting its actions back on *.
+        Set<String> covered = new TreeSet<>(ResourceArnBuilder.ECS_TYPE_RESOLVERS.keySet());
+        covered.addAll(ResourceArnBuilder.ECS_UNRESOLVED_TYPES.keySet());
+        IamActionResources.Catalog ecs = IamActionResources.forService("ecs");
+        for (Map.Entry<String, List<String>> entry : ecs.actionResources().entrySet()) {
+            if (ResourceArnBuilder.ECS_ARN_PARAMETERS.containsKey(entry.getKey())) {
+                continue;
+            }
+            for (String resourceType : entry.getValue()) {
+                assertTrue(covered.contains(resourceType), "AWS authorizes ecs:" + entry.getKey()
+                        + " against '" + resourceType + "', which ResourceArnBuilder neither "
+                        + "resolves nor lists as unresolved, so the action falls back to *");
+            }
+        }
+        for (String declared : covered) {
+            assertTrue(ecs.resourceArnFormats().containsKey(declared),
+                    declared + " is resolved or declared but AWS no longer publishes it for ECS");
+        }
+    }
+
+    @Test
+    void theEcsMapListsResourcelessActionsAndTheTaggingActionsTakeEveryType() {
+        IamActionResources.Catalog ecs = IamActionResources.forService("ecs");
+        assertEquals(List.of(), ecs.typesOf("ListClusters"));
+        assertTrue(ecs.actionResources().containsKey("ListClusters"));
+        assertEquals(List.of("service"), ecs.typesOf("UpdateService"));
+        assertEquals(List.of("cluster", "task"), ecs.typesOf("ExecuteCommand"));
+        for (String tagging : ResourceArnBuilder.ECS_ARN_PARAMETERS.keySet()) {
+            assertTrue(ecs.typesOf(tagging).size() > 1, tagging + " names a single type now");
+        }
+    }
+
+    @Test
+    void theEc2MapHoldsOnlySecurityGroupActions() {
+        IamActionResources.Catalog ec2 = IamActionResources.forService("ec2");
+        assertEquals(Set.of("security-group"), ec2.resourceArnFormats().keySet());
+        for (Map.Entry<String, List<String>> entry : ec2.actionResources().entrySet()) {
+            assertEquals(List.of("security-group"), entry.getValue(), entry.getKey());
+        }
+        assertTrue(ec2.actionResources().keySet().containsAll(ResourceArnBuilder.EC2_GROUP_ONLY_ACTIONS),
+                "a group-only action is no longer one AWS authorizes against a security group");
+    }
+
+    @Test
+    void ecsAndEc2ArnsSpellTheTypeInFrontOfTheName() {
+        for (String service : List.of("ecs", "ec2")) {
+            for (Map.Entry<String, List<String>> entry
+                    : IamActionResources.forService(service).resourceArnFormats().entrySet()) {
+                for (String arnFormat : entry.getValue()) {
+                    assertTrue(arnFormat.contains(":" + entry.getKey() + "/"),
+                            "AWS spells a " + service + " " + entry.getKey() + " ARN as " + arnFormat);
+                }
+            }
+        }
+    }
+
+    @Test
+    void aServiceWithNoVendoredMapIsRefused() {
+        assertThrows(IllegalArgumentException.class, () -> IamActionResources.forService("s3"));
+    }
+
+    @Test
+    void aMalformedMapNamesItsOwnFile() {
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> IamActionResources.parse(IamActionResources.ECS_RESOURCE_NAME,
+                        new ByteArrayInputStream("{\"resourceArnFormats\":{}}".getBytes(StandardCharsets.UTF_8))));
+        assertTrue(failure.getMessage().contains(IamActionResources.ECS_RESOURCE_NAME), failure.getMessage());
+    }
+
     private static IamActionResources.Catalog parse(String json) throws IOException {
         return IamActionResources.parse(
                 new ByteArrayInputStream(json.getBytes(StandardCharsets.UTF_8)));

@@ -108,6 +108,10 @@ jobs:
       - name: Check the vendored IAM action resource map is well-formed
         run: make iam-action-resources-check
 
+      # The same generator vendors ECS's map and EC2's security-group actions, gated the same way.
+      - name: Check the vendored ECS and EC2 action resource maps are well-formed
+        run: make ecs-action-resources-check ec2-action-resources-check
+
       # And for the map of operations AWS authorizes under another action's name: a malformed
       # entry would authorize a request as an action AWS does not check for it.
       - name: Check the vendored map of operations to their IAM actions is well-formed

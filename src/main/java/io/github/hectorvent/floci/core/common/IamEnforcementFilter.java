@@ -1508,7 +1508,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /**
      * Logs and Secrets Manager targets depend on the serving operation and the request's partition;
-     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in.
+     * Scheduler, Pipes, ECS and EC2 targets on the request's partition, which those services mint their ARNs in.
      */
     private List<String> targetResources(String credentialScope, String action, ContainerRequestContext ctx,
                                          String region, String accountId) {
@@ -1518,7 +1518,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("secretsmanager".equals(credentialScope)) {
             return arnBuilder.buildSecretsManagerResources(action, ctx, region, accountId, requestPartition());
         }
-        if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope)) {
+        if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope)
+                || "ecs".equals(credentialScope) || "ec2".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
         return arnBuilder.buildResources(credentialScope, ctx, region, accountId);
@@ -1657,6 +1658,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String resourcePath = formatS3ResourcePath(resourceArn);
             return s3XmlAccessDenied(message, resourcePath);
         }
+        if ("ec2".equals(credentialScope)) {
+            return ec2XmlUnauthorized(message);
+        }
         if (protocol == WireProtocol.AWS_QUERY || isFormEncoded(requestMediaType)) {
             return queryXmlAccessDenied(message);
         }
@@ -1676,6 +1680,26 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return mt != null
                 && "application".equalsIgnoreCase(mt.getType())
                 && "x-www-form-urlencoded".equalsIgnoreCase(mt.getSubtype());
+    }
+
+    /**
+     * EC2 answers a denied call with {@code UnauthorizedOperation} in its own envelope,
+     * {@code <Response><Errors><Error>}, which is the only shape the EC2 SDKs parse an error
+     * code from.
+     */
+    private static Response ec2XmlUnauthorized(String message) {
+        String xml = new XmlBuilder()
+                .start("Response")
+                  .start("Errors")
+                    .start("Error")
+                      .elem("Code", "UnauthorizedOperation")
+                      .elem("Message", "You are not authorized to perform this operation. " + message)
+                    .end("Error")
+                  .end("Errors")
+                  .elem("RequestID", RequestIdFilter.current())
+                .end("Response")
+                .build();
+        return Response.status(403).type(MediaType.APPLICATION_XML).entity(xml).build();
     }
 
     private static Response queryXmlAccessDenied(String message) {

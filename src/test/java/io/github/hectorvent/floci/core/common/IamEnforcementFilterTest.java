@@ -105,6 +105,7 @@ class IamEnforcementFilterTest {
         when(iamConfig.enforcementEnabled()).thenReturn(true);
         when(config.defaultRegion()).thenReturn("us-east-1");
         when(arnBuilder.buildResources(any(), any(), any(), any())).thenReturn(List.of("*"));
+        when(arnBuilder.buildResources(any(), any(), any(), any(), any())).thenReturn(List.of("*"));
         when(arnBuilder.build(any(), any(), any(), any())).thenReturn("*");
         // Default: scopes are already canonical. Alias handling is asserted explicitly below.
         when(catalog.canonicalCredentialScope(anyString())).thenAnswer(inv -> inv.getArgument(0));
@@ -445,6 +446,28 @@ class IamEnforcementFilterTest {
         newFilter(resourceInfo(SchedulerController.class)).filter(containerRequest);
 
         verify(arnBuilder).buildResources("scheduler", containerRequest, "xx-local-1", "000000000000", "aws-cn");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ecs, ecs:UpdateService", "ec2, ec2:RevokeSecurityGroupEgress"})
+    void ecsAndEc2ResourcesAreBuiltInTheRequestsPartition(String service, String action) {
+        // ECS and EC2 mint their ARNs in the request's partition, so a Region no partition
+        // publishes takes the deployment's, as Scheduler's does.
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/xx-local-1/" + service + "/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("xx-local-1");
+        requestContext.setPartition("aws-cn");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve(service, containerRequest)).thenReturn(action);
+        when(iamService.resolveCallerContext(eq("AKIAUSER"), any())).thenReturn(CallerContext.of(List.of()));
+
+        newFilter().filter(containerRequest);
+
+        verify(arnBuilder).buildResources(service, containerRequest, "xx-local-1", "000000000000", "aws-cn");
+        verify(arnBuilder, never()).buildResources(service, containerRequest, "xx-local-1", "000000000000");
     }
 
     @Test

@@ -1,0 +1,342 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_iam_action_resources.py --service ecs",
+    "reference": "https://servicereference.us-east-1.amazonaws.com/v1/ecs/ecs.json",
+    "retrieved": "2026-10-24",
+    "note": "make ecs-action-resources-verify checks every entry against AWS."
+  },
+  "actionResources": {
+    "AllowVendedLogDeliveryForResource": [
+      "cluster"
+    ],
+    "AssociateGatewayWithCluster": [
+      "gateway"
+    ],
+    "ContinueServiceDeployment": [
+      "service",
+      "service-deployment"
+    ],
+    "CreateCapacityProvider": [
+      "capacity-provider"
+    ],
+    "CreateCluster": [
+      "cluster"
+    ],
+    "CreateDaemon": [
+      "daemon"
+    ],
+    "CreateExpressGatewayService": [
+      "service"
+    ],
+    "CreateGateway": [
+      "gateway"
+    ],
+    "CreateService": [
+      "service"
+    ],
+    "CreateTaskSet": [
+      "task-set"
+    ],
+    "DeleteAccountSetting": [],
+    "DeleteAttributes": [
+      "container-instance"
+    ],
+    "DeleteCapacityProvider": [
+      "capacity-provider"
+    ],
+    "DeleteCluster": [
+      "cluster"
+    ],
+    "DeleteDaemon": [
+      "daemon"
+    ],
+    "DeleteDaemonTaskDefinition": [
+      "daemon-task-definition"
+    ],
+    "DeleteExpressGatewayService": [
+      "service"
+    ],
+    "DeleteGateway": [
+      "gateway"
+    ],
+    "DeleteService": [
+      "service"
+    ],
+    "DeleteTaskDefinitions": [
+      "task-definition"
+    ],
+    "DeleteTaskSet": [
+      "task-set"
+    ],
+    "DeregisterContainerInstance": [
+      "cluster"
+    ],
+    "DeregisterTaskDefinition": [],
+    "DescribeCapacityProviders": [
+      "capacity-provider"
+    ],
+    "DescribeClusters": [
+      "cluster"
+    ],
+    "DescribeContainerInstances": [
+      "container-instance"
+    ],
+    "DescribeDaemon": [
+      "daemon"
+    ],
+    "DescribeDaemonDeployments": [
+      "daemon",
+      "daemon-deployment"
+    ],
+    "DescribeDaemonRevisions": [
+      "daemon",
+      "daemon-revision"
+    ],
+    "DescribeDaemonTaskDefinition": [
+      "daemon-task-definition"
+    ],
+    "DescribeExpressGatewayService": [
+      "service"
+    ],
+    "DescribeGateway": [
+      "gateway"
+    ],
+    "DescribeGatewayResources": [
+      "gateway"
+    ],
+    "DescribeGatewayRoute": [
+      "gateway",
+      "gateway-route"
+    ],
+    "DescribeServiceDeployments": [
+      "service",
+      "service-deployment"
+    ],
+    "DescribeServiceRevisions": [
+      "service",
+      "service-revision"
+    ],
+    "DescribeServices": [
+      "service"
+    ],
+    "DescribeTaskDefinition": [],
+    "DescribeTaskSets": [
+      "task-set"
+    ],
+    "DescribeTasks": [
+      "task"
+    ],
+    "DisassociateGatewayFromCluster": [
+      "gateway"
+    ],
+    "DiscoverPollEndpoint": [],
+    "ExecuteCommand": [
+      "cluster",
+      "task"
+    ],
+    "GetTaskProtection": [
+      "task"
+    ],
+    "ListAccountSettings": [],
+    "ListAttributes": [
+      "cluster"
+    ],
+    "ListClusters": [],
+    "ListContainerInstances": [
+      "cluster"
+    ],
+    "ListDaemonDeployments": [
+      "daemon"
+    ],
+    "ListDaemonTaskDefinitions": [],
+    "ListDaemons": [],
+    "ListGatewayClusterAssociations": [
+      "cluster",
+      "gateway"
+    ],
+    "ListGatewayRoutes": [
+      "cluster",
+      "gateway",
+      "gateway-route",
+      "service"
+    ],
+    "ListGateways": [
+      "gateway"
+    ],
+    "ListServiceDeployments": [
+      "service"
+    ],
+    "ListServices": [],
+    "ListServicesByNamespace": [],
+    "ListTagsForResource": [
+      "capacity-provider",
+      "cluster",
+      "container-instance",
+      "service",
+      "task",
+      "task-definition",
+      "task-set"
+    ],
+    "ListTaskDefinitionFamilies": [],
+    "ListTaskDefinitions": [],
+    "ListTasks": [
+      "container-instance"
+    ],
+    "Poll": [
+      "container-instance"
+    ],
+    "PutAccountSetting": [],
+    "PutAccountSettingDefault": [],
+    "PutAttributes": [
+      "container-instance"
+    ],
+    "PutClusterCapacityProviders": [
+      "cluster"
+    ],
+    "PutSystemLogEvents": [
+      "cluster",
+      "container-instance"
+    ],
+    "RegisterContainerInstance": [
+      "cluster"
+    ],
+    "RegisterDaemonTaskDefinition": [
+      "daemon-task-definition"
+    ],
+    "RegisterTaskDefinition": [
+      "task-definition"
+    ],
+    "RunTask": [
+      "task-definition"
+    ],
+    "StartTask": [
+      "task-definition"
+    ],
+    "StartTelemetrySession": [
+      "container-instance"
+    ],
+    "StopServiceDeployment": [
+      "service",
+      "service-deployment"
+    ],
+    "StopTask": [
+      "task"
+    ],
+    "SubmitAttachmentStateChanges": [
+      "cluster"
+    ],
+    "SubmitContainerStateChange": [
+      "cluster"
+    ],
+    "SubmitTaskStateChange": [
+      "cluster"
+    ],
+    "TagResource": [
+      "capacity-provider",
+      "cluster",
+      "container-instance",
+      "daemon",
+      "daemon-task-definition",
+      "gateway",
+      "service",
+      "task",
+      "task-definition",
+      "task-set"
+    ],
+    "UntagResource": [
+      "capacity-provider",
+      "cluster",
+      "container-instance",
+      "daemon",
+      "daemon-task-definition",
+      "gateway",
+      "service",
+      "task",
+      "task-definition",
+      "task-set"
+    ],
+    "UpdateCapacityProvider": [
+      "capacity-provider"
+    ],
+    "UpdateCluster": [
+      "cluster"
+    ],
+    "UpdateClusterSettings": [
+      "cluster"
+    ],
+    "UpdateContainerAgent": [
+      "container-instance"
+    ],
+    "UpdateContainerInstancesState": [
+      "container-instance"
+    ],
+    "UpdateDaemon": [
+      "daemon"
+    ],
+    "UpdateExpressGatewayService": [
+      "service"
+    ],
+    "UpdateGateway": [
+      "gateway"
+    ],
+    "UpdateService": [
+      "service"
+    ],
+    "UpdateServicePrimaryTaskSet": [
+      "service"
+    ],
+    "UpdateTaskProtection": [
+      "task"
+    ],
+    "UpdateTaskSet": [
+      "task-set"
+    ]
+  },
+  "resourceArnFormats": {
+    "capacity-provider": [
+      "arn:${Partition}:ecs:${Region}:${Account}:capacity-provider/${CapacityProviderName}"
+    ],
+    "cluster": [
+      "arn:${Partition}:ecs:${Region}:${Account}:cluster/${ClusterName}"
+    ],
+    "container-instance": [
+      "arn:${Partition}:ecs:${Region}:${Account}:container-instance/${ClusterName}/${ContainerInstanceId}"
+    ],
+    "daemon": [
+      "arn:${Partition}:ecs:${Region}:${Account}:daemon/${ClusterName}/${DaemonName}"
+    ],
+    "daemon-deployment": [
+      "arn:${Partition}:ecs:${Region}:${Account}:daemon-deployment/${ClusterName}/${DaemonName}/${DaemonDeploymentId}"
+    ],
+    "daemon-revision": [
+      "arn:${Partition}:ecs:${Region}:${Account}:daemon-revision/${ClusterName}/${DaemonName}/${DaemonRevisionId}"
+    ],
+    "daemon-task-definition": [
+      "arn:${Partition}:ecs:${Region}:${Account}:daemon-task-definition/${DaemonTaskDefinitionFamilyName}:${DaemonTaskDefinitionRevisionNumber}"
+    ],
+    "gateway": [
+      "arn:${Partition}:ecs:${Region}:${Account}:gateway/${GatewayName}/${GatewayId}"
+    ],
+    "gateway-route": [
+      "arn:${Partition}:ecs:${Region}:${Account}:gateway-route/${GatewayName}/${GatewayId}/${RouteId}"
+    ],
+    "service": [
+      "arn:${Partition}:ecs:${Region}:${Account}:service/${ClusterName}/${ServiceName}"
+    ],
+    "service-deployment": [
+      "arn:${Partition}:ecs:${Region}:${Account}:service-deployment/${ClusterName}/${ServiceName}/${ServiceDeploymentId}"
+    ],
+    "service-revision": [
+      "arn:${Partition}:ecs:${Region}:${Account}:service-revision/${ClusterName}/${ServiceName}/${ServiceRevisionId}"
+    ],
+    "task": [
+      "arn:${Partition}:ecs:${Region}:${Account}:task/${ClusterName}/${TaskId}"
+    ],
+    "task-definition": [
+      "arn:${Partition}:ecs:${Region}:${Account}:task-definition/${TaskDefinitionFamilyName}:${TaskDefinitionRevisionNumber}"
+    ],
+    "task-set": [
+      "arn:${Partition}:ecs:${Region}:${Account}:task-set/${ClusterName}/${ServiceName}/${TaskSetId}"
+    ]
+  }
+}

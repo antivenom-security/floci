@@ -62,11 +62,13 @@ PREFIX ?= $(HOME)/.local
         iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
         iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
+        ecs-action-resources-sync ecs-action-resources-check ecs-action-resources-verify \
+        ec2-action-resources-sync ec2-action-resources-check ec2-action-resources-verify \
         cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
         iam-authorized-actions-verify iam-authorized-actions-test iam-data-verify
 
 help: ## List the targets below
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 dev: ## Run Floci in Quarkus dev mode (hot reload on port 4566)
 	./mvnw quarkus:dev
@@ -360,15 +362,70 @@ iam-action-resources-verify: ## CI gate (online): every vendored IAM action reso
 		exit 1; \
 	fi
 
+# ECS and EC2 reuse the IAM generator with --service; its unit tests cover all three, so
+# iam-action-resources-test is their test target too.
+ecs-action-resources-sync: ## Regenerate src/main/resources/aws/ecs-action-resources.json from AWS (commit the result)
+	$(PYTHON) tools/aws/regen_iam_action_resources.py --service ecs
+
+ecs-action-resources-check: ## CI gate (offline): the vendored ECS action resource map must be well-formed
+	@$(PYTHON) tools/aws/regen_iam_action_resources.py --service ecs --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/ecs-action-resources.json is malformed."; \
+		echo "       Run 'make ecs-action-resources-sync' and commit the result."; \
+		exit 1; \
+	}
+
+ecs-action-resources-verify: ## CI gate (online): every vendored ECS action resource must match AWS
+	@$(PYTHON) tools/aws/regen_iam_action_resources.py --service ecs --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's ECS service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored ECS action resource map claims a resource AWS does not use,"; \
+		echo "       so enforcement would authorize against the wrong thing."; \
+		echo "       Run 'make ecs-action-resources-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+ec2-action-resources-sync: ## Regenerate src/main/resources/aws/ec2-action-resources.json from AWS (commit the result)
+	$(PYTHON) tools/aws/regen_iam_action_resources.py --service ec2
+
+ec2-action-resources-check: ## CI gate (offline): the vendored EC2 action resource map must be well-formed
+	@$(PYTHON) tools/aws/regen_iam_action_resources.py --service ec2 --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/ec2-action-resources.json is malformed."; \
+		echo "       Run 'make ec2-action-resources-sync' and commit the result."; \
+		exit 1; \
+	}
+
+ec2-action-resources-verify: ## CI gate (online): every vendored EC2 action resource must match AWS
+	@$(PYTHON) tools/aws/regen_iam_action_resources.py --service ec2 --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's EC2 service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored EC2 security-group action map claims a resource AWS does not use,"; \
+		echo "       so enforcement would authorize against the wrong thing."; \
+		echo "       Run 'make ec2-action-resources-sync' and commit the result."; \
+		exit 1; \
+	fi
+
 iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS
 	@# Both halves run even when the first fails, so one file's drift cannot hide the other's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; \
+	@namespaces=0; actions=0; authorized=0; ecs=0; ec2=0; \
 	$(MAKE) --no-print-directory iam-namespaces-verify || namespaces=$$?; \
 	$(MAKE) --no-print-directory iam-action-resources-verify || actions=$$?; \
 	$(MAKE) --no-print-directory iam-authorized-actions-verify || authorized=$$?; \
-	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ]; then \
+	$(MAKE) --no-print-directory ecs-action-resources-verify || ecs=$$?; \
+	$(MAKE) --no-print-directory ec2-action-resources-verify || ec2=$$?; \
+	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || \
+	   [ $$ecs -ne 0 ] || [ $$ec2 -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -379,6 +436,12 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		fi; \
 		if [ $$authorized -ne 0 ]; then \
 			echo "       the map of operations to their IAM actions, see its message above"; \
+		fi; \
+		if [ $$ecs -ne 0 ]; then \
+			echo "       the ECS action resource map, see its message above"; \
+		fi; \
+		if [ $$ec2 -ne 0 ]; then \
+			echo "       the EC2 security-group action map, see its message above"; \
 		fi; \
 		exit 1; \
 	fi

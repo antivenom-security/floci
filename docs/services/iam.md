@@ -1563,7 +1563,7 @@ that `DbName` needs is not checked.
 
 **IAM's own resources are named.** When enforcement evaluates a request, the target resource comes
 from `ResourceArnBuilder`, which builds an ARN for S3, Lambda, SQS, SNS, DynamoDB, Kinesis, Secrets
-Manager, SSM, KMS and IAM. Within IAM the resource type each action is evaluated against is the one
+Manager, SSM, KMS, IAM, ECS and EC2 security groups. Within IAM the resource type each action is evaluated against is the one
 the Service Authorization Reference gives it, so a statement naming a specific user, role, group,
 instance profile, managed policy, MFA device, identity provider or server certificate constrains
 it: a `Deny` on `arn:aws:iam::123456789012:user/bob` stops `DeleteUser` for Bob and leaves other
@@ -1609,6 +1609,47 @@ A resource of `*` is matched as that literal string, because the evaluator globs
 pattern against the request's resource and not the other way round. So a statement whose `Resource`
 names an ARN applies to such a request in neither direction: a `Deny` on one of those actions does
 not refuse it, and an `Allow` does not permit it either.
+
+**ECS and EC2 security groups are named.** ECS actions are evaluated against the resource types the
+Service Reference gives them, vendored the same way in `src/main/resources/aws/ecs-action-resources.json`,
+so a `Deny` on `arn:aws:ecs:us-east-1:123456789012:service/c1/s2` stops `UpdateService` on that service
+and leaves the others alone, and an `Allow` on `service/c1/*` does not reach a service in another
+cluster. The resource checked is the one the handler acts on: each reference is resolved through the
+same lookup the handler uses, and the stored resource's ARN is what the policy is matched against.
+
+- A cluster is found by name in the request's Region or by ARN in any Region; a request naming no
+  cluster acts on `cluster/default`.
+- A task is found by its ARN or id in any cluster, so a `Deny` on `task/c1/<id>` applies whether the
+  request names `c1`, another cluster or none.
+- `UpdateService` and `DeleteService` act on the request's cluster (or the default) and the name after
+  the reference's last `/`, so a service ARN naming another cluster is authorized as the service it
+  reaches. The other service actions, `DescribeServices` and the task-set actions among them, find a
+  service in the request's cluster first and then by ARN or name in any.
+- A task definition named as `family`, `family:revision` or an ARN is the revision the handler uses;
+  `RegisterTaskDefinition` is evaluated against the revision it would register.
+- `DescribeServiceDeployments` and `DescribeServiceRevisions` are evaluated against each ARN they name
+  and the service it belongs to; `TagResource`, `UntagResource` and `ListTagsForResource` against
+  `resourceArn` as given.
+- A resource that does not exist is evaluated against the ARN the request gives, in that ARN's own
+  partition, Region and account, or one minted from its name, never `*`, so a `Deny` on it still applies
+  before the handler answers that it is not there. A create is evaluated against the ARN its request
+  mints (`CreateTaskSet` against `task-set/<cluster>/<service>/*`, the id not being assigned yet).
+- Actions the reference gives no resource type, such as `ListClusters`, `ListServices` and
+  `DescribeTaskDefinition`, resolve to `*`. The daemon and gateway types belong only to actions Floci
+  does not dispatch.
+
+For EC2, only the actions AWS authorizes against a security group are resolved, from
+`src/main/resources/aws/ec2-action-resources.json`. The groups are read from the members the handler
+reads them from (`GroupId`, `SecurityGroupId.N`, `Groups.SecurityGroupId.N`, `AddSecurityGroupId.N` and
+the like, or an `sg-` `ResourceId.N` on `CreateTags` and `DeleteTags`) and become `security-group/<id>`;
+a group a rule refers to (`IpPermissions.N.Groups.N.GroupId`) is not one of them. A `RunInstances`
+naming no group is evaluated against the groups its launch template gives it. `CreateSecurityGroup`
+is evaluated against `security-group/*`. Only the rule and delete actions act on the group alone; every
+other action, `CreateSecurityGroup`, `RunInstances` and `ModifySecurityGroupRules` among them, is also
+checked by AWS against types that are not vendored, such as the VPC or the instance, so it keeps `*`
+beside the groups it names: a `Deny` on a group binds, and an `Allow` on `security-group/*` alone does
+not grant it. An action naming no group stays on `*`, as does every other EC2 action. Condition keys
+such as `ecs:cluster`, `ec2:Vpc` and `aws:ResourceTag` are not populated for these resources.
 
 **A rename names two resources.** `UpdateUser`, `UpdateGroup` and `UpdateServerCertificate` are
 evaluated against both the resource's current ARN and the ARN the new name or `NewPath` would

@@ -4,6 +4,8 @@ Run with: pytest tools/aws -q  (or: make iam-action-resources-test)
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import regen_iam_action_resources as r
@@ -222,3 +224,153 @@ def test_an_arn_format_aws_added_is_reported_without_failing():
 def test_matching_formats_verify_clean():
     formats = {"user": ["arn:${Partition}:iam::${Account}:user/${UserNameWithPath}"]}
     assert r.verify_formats_against(formats, dict(formats)) == ([], [])
+
+
+# --------------------------------------------------------------------------- #
+# --service: ECS and EC2 vendored by the same generator
+# --------------------------------------------------------------------------- #
+ECS = r.SERVICES["ecs"]
+EC2 = r.SERVICES["ec2"]
+SG = "security-group"
+
+
+def service_reference(service: r.Service, actions: dict[str, list[str]]) -> dict:
+    """Like `reference`, but with the service's own ARN formats."""
+    types = sorted({t for names in actions.values() for t in names})
+    return {
+        "Name": service.name,
+        "Actions": [{"Name": name, "Resources": [{"Name": t} for t in resource_types]}
+                    for name, resource_types in actions.items()],
+        "Resources": [{"Name": t, "ARNFormats": [
+            f"arn:${{Partition}}:{service.name}:${{Region}}:${{Account}}:{t}/${{Id}}"]}
+            for t in types],
+    }
+
+
+def test_the_default_service_is_iam_and_keeps_its_paths():
+    assert r.SERVICES["iam"] is r.IAM
+    assert r.OUTPUT == r.REPO_ROOT / "src/main/resources/aws/iam-action-resources.json"
+    assert r.REFERENCE_URL == "https://servicereference.us-east-1.amazonaws.com/v1/iam/iam.json"
+    assert r.IAM.generator == "tools/aws/regen_iam_action_resources.py"
+
+
+@pytest.mark.parametrize("name", ["ecs", "ec2"])
+def test_each_service_reads_and_writes_its_own_files(name):
+    service = r.SERVICES[name]
+    assert service.reference_url == (
+        f"https://servicereference.us-east-1.amazonaws.com/v1/{name}/{name}.json")
+    assert service.output == r.REPO_ROOT / f"src/main/resources/aws/{name}-action-resources.json"
+    source = r.build(service_reference(service, dict(service.anchors)), "a test", service)["_source"]
+    assert source["generator"] == f"tools/aws/regen_iam_action_resources.py --service {name}"
+    assert source["note"] == f"make {name}-action-resources-verify checks every entry against AWS."
+
+
+def test_an_ecs_document_keeps_every_action_and_validates():
+    actions = dict(ECS.anchors)
+    actions["ListClusters"] = []
+    doc = r.build(service_reference(ECS, actions), "a test", ECS)
+    assert r.validate(doc, ECS) == []
+    assert doc["actionResources"]["ListClusters"] == []
+
+
+def test_an_iam_arn_format_is_not_an_ecs_one():
+    payload = service_reference(ECS, {"UpdateService": ["service"]})
+    payload["Resources"][0]["ARNFormats"] = ["arn:${Partition}:iam::${Account}:service/${Id}"]
+    with pytest.raises(ValueError):
+        r.arn_formats_from(payload, ECS)
+
+
+def test_the_ecs_anchors_are_checked_rather_than_iams():
+    actions = dict(ECS.anchors)
+    actions["RunTask"] = ["cluster"]
+    problems = r.validate(r.build(service_reference(ECS, actions), "a test", ECS), ECS)
+    assert any("RunTask" in problem for problem in problems)
+    assert not any("AddUserToGroup" in problem for problem in problems)
+
+
+# --------------------------------------------------------------------------- #
+# The EC2 filter: security-group actions only, each trimmed to that type
+# --------------------------------------------------------------------------- #
+EC2_UPSTREAM = {
+    "AuthorizeSecurityGroupIngress": [SG, "security-group-rule"],
+    "AuthorizeSecurityGroupEgress": [SG, "security-group-rule"],
+    "RevokeSecurityGroupIngress": [SG, "security-group-rule"],
+    "RevokeSecurityGroupEgress": [SG, "security-group-rule"],
+    "DeleteSecurityGroup": [SG],
+    "RunInstances": ["instance", "subnet", SG, "volume"],
+    "DescribeSecurityGroups": [],
+    "DescribeInstances": [],
+    "StartInstances": ["instance"],
+}
+
+
+def test_the_ec2_filter_keeps_only_security_group_actions_trimmed_to_it():
+    parsed = r.action_resources_from(service_reference(EC2, EC2_UPSTREAM), EC2)
+    assert set(parsed) == set(EC2.anchors)
+    assert all(types == [SG] for types in parsed.values())
+
+
+def test_the_ec2_filter_keeps_only_the_security_group_format():
+    payload = service_reference(EC2, EC2_UPSTREAM)
+    # EC2 also publishes types borrowed from other services, which are not EC2 ARNs and would
+    # fail the format check if the filter ran after it.
+    payload["Resources"].append({"Name": "certificate", "ARNFormats": [
+        "arn:${Partition}:acm:${Region}:${Account}:certificate/${CertificateId}"]})
+    assert list(r.arn_formats_from(payload, EC2)) == [SG]
+
+
+def test_a_built_ec2_document_validates():
+    doc = r.build(service_reference(EC2, EC2_UPSTREAM), "a test", EC2)
+    assert r.validate(doc, EC2) == []
+
+
+def test_an_untrimmed_ec2_entry_is_rejected():
+    doc = r.build(service_reference(EC2, EC2_UPSTREAM), "a test", EC2)
+    doc["actionResources"]["RunInstances"] = ["instance", SG]
+    doc["resourceArnFormats"]["instance"] = [
+        "arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}"]
+    problems = r.validate(doc, EC2)
+    assert any("RunInstances" in problem and "trimmed" in problem for problem in problems)
+    assert any("only 'security-group'" in problem for problem in problems)
+
+
+def test_an_ec2_action_the_filter_drops_is_rejected_if_present():
+    doc = r.build(service_reference(EC2, EC2_UPSTREAM), "a test", EC2)
+    doc["actionResources"] = dict(sorted({**doc["actionResources"],
+                                          "DescribeSecurityGroups": [SG]}.items()))
+    assert any("DescribeSecurityGroups" in problem and "filtered out" in problem
+               for problem in r.validate(doc, EC2))
+
+
+def test_ec2_verify_reports_only_security_group_drift():
+    # The same filter on the upstream side: a new non-SG action, or a new non-SG type on a kept
+    # action, is not drift for this file. A new SG action is.
+    vendored = r.action_resources_from(service_reference(EC2, EC2_UPSTREAM), EC2)
+    newer = dict(EC2_UPSTREAM)
+    newer["StopInstances"] = ["instance"]
+    newer["DeleteSecurityGroup"] = [SG, "vpc"]
+    newer["ModifySecurityGroupRules"] = [SG, "security-group-rule"]
+    upstream = r.action_resources_from(service_reference(EC2, newer), EC2)
+    assert r.verify_against(vendored, upstream) == ([], ["ModifySecurityGroupRules (new action)"])
+
+
+def test_ec2_verify_fails_when_aws_stops_authorizing_an_action_against_the_group():
+    vendored = r.action_resources_from(service_reference(EC2, EC2_UPSTREAM), EC2)
+    newer = dict(EC2_UPSTREAM)
+    newer["RunInstances"] = ["instance", "subnet", "volume"]
+    upstream = r.action_resources_from(service_reference(EC2, newer), EC2)
+    untrue, _ = r.verify_against(vendored, upstream)
+    assert untrue == ["'RunInstances' is not an action AWS publishes"]
+
+
+def test_main_verifies_ec2_through_the_filter(tmp_path, capsys, monkeypatch):
+    vendored = tmp_path / "ec2-action-resources.json"
+    source = tmp_path / "ec2.json"
+    upstream = service_reference(EC2, {**EC2_UPSTREAM, "StopInstances": ["instance"]})
+    vendored.write_text(r.render(r.build(service_reference(EC2, EC2_UPSTREAM), "a test", EC2)))
+    source.write_text(json.dumps(upstream))
+    monkeypatch.setattr(r, "REPO_ROOT", tmp_path)  # the summary names the file relative to it
+    assert r.main(["--service", "ec2", "--verify", "--source", str(source),
+                   "--output", str(vendored)]) == 0
+    assert r.main(["--service", "ec2", "--check", "--output", str(vendored)]) == 0
+    assert "nothing added upstream" in capsys.readouterr().out
