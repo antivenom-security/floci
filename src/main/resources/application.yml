@@ -822,6 +822,8 @@ floci:
     elbv2:
       enabled: true
       mock: false
+      access-logs:
+        interval: 300                             # FLOCI_SERVICES_ELBV2_ACCESS_LOGS_INTERVAL
     codebuild:
       enabled: true
       # docker-network: floci-network

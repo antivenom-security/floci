@@ -3506,6 +3506,19 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean mock();
+
+        /** Application Load Balancer access-log delivery. */
+        ElbV2AccessLogsConfig accessLogs();
+    }
+
+    interface ElbV2AccessLogsConfig {
+        /**
+         * Seconds each access-log file covers; a file is written when its interval ends.
+         *
+         * Env var: FLOCI_SERVICES_ELBV2_ACCESS_LOGS_INTERVAL
+         */
+        @WithDefault("300")
+        int interval();
     }
 
     interface EksServiceConfig {

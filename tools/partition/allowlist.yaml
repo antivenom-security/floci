@@ -22,3 +22,7 @@ patterns:
   - regex: \bPARTITION_REGEX\b
     reason: the line builds its regex from AwsArnUtils.PARTITION_REGEX, which is the
       sanctioned way to recognise an ARN in any partition.
+  - regex: ^\s+Map\.entry\("[a-z]{2}(-gov)?-[a-z]+-\d", "\d{12}"\)
+    reason: a Region's Elastic Load Balancing account for legacy access-log bucket policies
+      (ElbV2AccessLogWriter), transcribed from the "Enable access logs" guide; each Region
+      ID names its own partition.

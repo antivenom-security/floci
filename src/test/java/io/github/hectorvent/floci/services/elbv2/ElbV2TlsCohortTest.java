@@ -163,10 +163,8 @@ class ElbV2TlsCohortTest {
             }
             firstPublication.get(5, TimeUnit.SECONDS);
             secondPublication.get(5, TimeUnit.SECONDS);
-            HttpServerRequest request = mock(HttpServerRequest.class);
             HttpServerResponse response = mock(HttpServerResponse.class);
-            when(request.host()).thenReturn(alias);
-            when(request.response()).thenReturn(response);
+            HttpServerRequest request = ElbV2PublicationTestSupport.request(alias, response);
             when(response.setStatusCode(anyInt())).thenReturn(response);
             handler.getValue().handle(request);
             verify(response).setStatusCode(502);
@@ -185,10 +183,8 @@ class ElbV2TlsCohortTest {
             assertEquals(List.of(replacement.certificateBody().stripTrailing() + "\n"),
                     finalOptions.getCertValues().stream().map(value -> value.toString()).toList());
             removeRuntime(dataPlane, right.getListenerArn(), right.getPort());
-            HttpServerRequest survivingRequest = mock(HttpServerRequest.class);
             HttpServerResponse survivingResponse = mock(HttpServerResponse.class);
-            when(survivingRequest.host()).thenReturn(alias);
-            when(survivingRequest.response()).thenReturn(survivingResponse);
+            HttpServerRequest survivingRequest = ElbV2PublicationTestSupport.request(alias, survivingResponse);
             when(survivingResponse.setStatusCode(anyInt())).thenReturn(survivingResponse);
             handler.getValue().handle(survivingRequest);
             verify(survivingResponse).setStatusCode(200);

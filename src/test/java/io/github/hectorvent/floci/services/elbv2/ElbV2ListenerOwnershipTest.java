@@ -590,10 +590,8 @@ class ElbV2ListenerOwnershipTest {
         }
 
         private void serves(int port, String body) {
-            HttpServerRequest request = mock(HttpServerRequest.class);
             HttpServerResponse response = mock(HttpServerResponse.class);
-            when(request.host()).thenReturn(HOST);
-            when(request.response()).thenReturn(response);
+            HttpServerRequest request = ElbV2PublicationTestSupport.request(HOST, response);
             when(response.setStatusCode(anyInt())).thenReturn(response);
             handlers.get(port).handle(request);
             verify(response).setStatusCode(200);

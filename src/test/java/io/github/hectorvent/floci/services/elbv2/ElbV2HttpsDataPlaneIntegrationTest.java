@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.acm.model.ValidationMethod;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusTest;
@@ -57,6 +59,7 @@ import java.security.MessageDigest;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -69,6 +72,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
+import java.util.zip.GZIPInputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -125,6 +130,25 @@ class ElbV2HttpsDataPlaneIntegrationTest {
 
     @Inject
     ElbV2DataPlane dataPlane;
+
+    @Inject
+    S3Service s3Service;
+
+    @Inject
+    ElbV2AccessLogWriter accessLogWriter;
+
+    private List<String> accessLogLines(String bucket) throws IOException {
+        List<String> lines = new ArrayList<>();
+        for (S3Object object : s3Service.listObjects(bucket, "AWSLogs/", null, 1000)) {
+            if (object.getKey().endsWith(".log.gz")) {
+                try (GZIPInputStream in = new GZIPInputStream(
+                        new ByteArrayInputStream(s3Service.getObject(bucket, object.getKey()).getData()))) {
+                    lines.addAll(List.of(new String(in.readAllBytes(), StandardCharsets.UTF_8).split("\n")));
+                }
+            }
+        }
+        return lines;
+    }
 
     @BeforeAll
     static void startTargetServer() throws IOException {
@@ -803,12 +827,25 @@ class ElbV2HttpsDataPlaneIntegrationTest {
                             + ".ServerCertificateMetadata.Arn");
             uploaded = true;
             listenerArn = createFixedResponseListener(loadBalancer.arn(), "HTTPS", HTTPS_PORT, certificateArn, "iam");
+            String bucket = name + "-logs";
+            s3Service.createBucket(bucket, REGION);
+            elbV2Service.modifyLoadBalancerAttributes(REGION, loadBalancer.arn(),
+                    Map.of("access_logs.s3.enabled", "true", "access_logs.s3.bucket", bucket));
             Certificate expected = new Certificate();
             expected.setCertificateBody(pair.certificatePem());
             HttpsResult result = awaitHttps(loadBalancer.dnsName(), expected);
             assertEquals(200, result.statusCode());
             assertEquals("iam", result.body());
             assertPeerCertificate(result.session(), expected, loadBalancer.dnsName());
+            String tlsFields = "^(https|h2) \\S+ \\S+ \\S+ - -1 -1 -1 200 - \\d+ \\d+ \"GET https://"
+                    + Pattern.quote(loadBalancer.dnsName()) + ":" + HTTPS_PORT + "/ HTTP/(1\\.1|2\\.0)\" \"[^\"]*\" "
+                    + "[A-Z0-9_-]+ TLSv1\\.[23] - \"[^\"]+\" \"" + Pattern.quote(loadBalancer.dnsName()) + "\" \""
+                    + Pattern.quote(certificateArn) + "\" 0 .* \"fixed-response\" .*";
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+                accessLogWriter.flushNow();
+                assertTrue(accessLogLines(bucket).stream().anyMatch(line -> line.matches(tlsFields)),
+                        accessLogLines(bucket).toString());
+            });
         } finally {
             try {
                 deleteListener(listenerArn);

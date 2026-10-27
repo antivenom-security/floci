@@ -125,6 +125,9 @@ HTTPS listeners require a default certificate. Supply one when creating a listen
 - `routing.http.preserve_host_header.enabled` (default `false`) controls whether the original client Host header is forwarded to targets unchanged, or replaced with the target's `host:port`.
 - `RegisterTargets` rejects link-local and cloud instance-metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`) with `InvalidTarget`, and the load balancer and its health checks refuse to connect to them. Loopback and private addresses stay reachable so a load balancer can front a neighbouring container.
 
+- Application Load Balancer access logs follow AWS's "Access log entries" format. With `access_logs.s3.enabled=true`, each request the data plane answers is written as one entry with AWS's 36 space-separated fields in order, quoted where AWS quotes them, with `-` (or `-1` for a processing time) for what the request never reached. The load balancer stamps an `X-Amzn-Trace-Id` on a request that has none and forwards it to the target, so `trace_id` matches what the target saw. Files are gzipped at `[prefix/]AWSLogs/<account>/elasticloadbalancing/<region>/yyyy/mm/dd/<account>_elasticloadbalancing_<region>_app.<name>.<id>_<end-time>_<ip>_<random>.log.gz`, one per load balancer node (the address that accepted the request) and interval, written when the interval ends (`FLOCI_SERVICES_ELBV2_ACCESS_LOGS_INTERVAL`, 300 seconds as on AWS) as the log-delivery service, so bucket event notifications fire. `classification` covers what Floci can see after Vert.x has parsed the request (`GetHeadZeroContentLength`, `UndefinedContentLengthSemantics`, `UndefinedTransferEncodingSemantics`, `NonCompliantHeader`); requests are classified but never blocked or closed for it. Transforms, HTTP/2 stream errors and `session-reused` are not modelled, so their fields are `-`.
+- Turning access logs on checks the bucket as AWS does: a prefix containing `AWSLogs` and a bucket in another Region are refused with `InvalidConfigurationRequest`, and a missing bucket, an SSE-KMS bucket, or a bucket policy that does not let `logdelivery.elasticloadbalancing.amazonaws.com` (or, in the Regions that support it, the Region's legacy Elastic Load Balancing account) put objects under `[prefix/]AWSLogs/<account>/` returns `InvalidConfigurationRequest` `Access Denied for bucket: <bucket>. Please check S3bucket permission`. The policy is evaluated only with IAM enforcement on, and again for each delivery. On success the load balancer writes `[prefix/]AWSLogs/<account>/ELBAccessLogTestFile`.
+
 ## ARN Format
 
 ```
@@ -198,6 +201,7 @@ aws elbv2 delete-target-group \
 | Environment variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ELBV2_ENABLED` | `true` | Enable or disable the ELBv2 service |
+| `FLOCI_SERVICES_ELBV2_ACCESS_LOGS_INTERVAL` | `300` | Seconds each access-log file covers, as AWS's 5 minutes |
 
 ## Listener Ports
 

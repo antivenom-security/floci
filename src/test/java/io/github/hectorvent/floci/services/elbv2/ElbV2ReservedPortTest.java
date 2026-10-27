@@ -541,10 +541,8 @@ class ElbV2ReservedPortTest {
     private static void assertFixedResponse(HttpServer server, String host, String body) {
         ArgumentCaptor<Handler<HttpServerRequest>> handler = ArgumentCaptor.captor();
         verify(server).requestHandler(handler.capture());
-        HttpServerRequest request = mock(HttpServerRequest.class);
         HttpServerResponse response = mock(HttpServerResponse.class);
-        when(request.host()).thenReturn(host);
-        when(request.response()).thenReturn(response);
+        HttpServerRequest request = ElbV2PublicationTestSupport.request(host, response);
         when(response.setStatusCode(anyInt())).thenReturn(response);
         handler.getValue().handle(request);
         verify(response).setStatusCode(200);
