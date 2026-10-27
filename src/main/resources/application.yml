@@ -568,6 +568,8 @@ floci:
       enabled: true
     wafv2:
       enabled: true
+      logs:
+        interval: 300                             # FLOCI_SERVICES_WAFV2_LOGS_INTERVAL
     scheduler:
       enabled: true
     cloudwatchlogs:

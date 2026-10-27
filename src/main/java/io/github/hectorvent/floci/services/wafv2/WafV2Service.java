@@ -154,6 +154,10 @@ public class WafV2Service {
         return ipSet;
     }
 
+    public IpSet findIpSet(String arn) {
+        return scanArn(ipSetStore, arn);
+    }
+
     public IpSet getIpSet(String scope, String id, String name) {
         return require(ipSetStore, scope, id, name);
     }
@@ -317,6 +321,11 @@ public class WafV2Service {
     public String getLoggingConfiguration(String resourceArn) {
         return loggingStore.get(resourceArn).orElseThrow(() -> new AwsException(
                 "WAFNonexistentItemException", "No logging configuration for: " + resourceArn, 400));
+    }
+
+    /** The stored logging configuration JSON for {@code resourceArn}, or null. */
+    public String findLoggingConfiguration(String resourceArn) {
+        return loggingStore.get(resourceArn).orElse(null);
     }
 
     public void deleteLoggingConfiguration(String resourceArn) {
