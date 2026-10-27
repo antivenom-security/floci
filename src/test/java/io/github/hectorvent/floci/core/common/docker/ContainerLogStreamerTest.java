@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.LogRecord;
@@ -33,6 +34,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -147,6 +149,24 @@ class ContainerLogStreamerTest {
                 argThat(events ->
                         events.size() == 1 && "audit event".equals(events.getFirst().get("message"))),
                 eq("us-east-1"));
+    }
+
+    @Test
+    void execStreamForwardsOneCloudWatchEventPerLine() {
+        CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(null, cloudWatchLogsService);
+        ResultCallback.Adapter<Frame> callback = streamer.execLogCallbackForAccount("555555555555",
+                "/aws/eks/cluster/cluster", "stream", "us-east-1", "eks-audit:cluster", false);
+
+        callback.onNext(new Frame(StreamType.STDOUT, utf8("{\"auditID\":\"1\"}\n{\"auditID\":\"2\"}\n{\"audit")));
+        callback.onNext(new Frame(StreamType.STDOUT, utf8("ID\":\"3\"}\n\n{\"auditID\":\"4\"}")));
+        callback.onComplete();
+
+        ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.captor();
+        verify(cloudWatchLogsService, times(4)).putLogEventsForAccount(
+                eq("555555555555"), eq("/aws/eks/cluster/cluster"), eq("stream"), events.capture(), eq("us-east-1"));
+        assertEquals(List.of("{\"auditID\":\"1\"}", "{\"auditID\":\"2\"}", "{\"auditID\":\"3\"}", "{\"auditID\":\"4\"}"),
+                events.getAllValues().stream().map(batch -> batch.getFirst().get("message")).toList());
     }
 
     @Test

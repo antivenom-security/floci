@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -249,9 +250,11 @@ class EksControlPlaneLogsDockerIntegrationTest {
         cluster.setLogging(new Logging(List.of(new LogSetup(List.of("audit"), true))));
 
         String auditEventJson = "{\"kind\":\"Event\",\"apiVersion\":\"audit.k8s.io/v1\",\"level\":\"Metadata\",\"stage\":\"ResponseComplete\",\"verb\":\"get\",\"user\":{\"username\":\"test-admin\"}}";
+        String secondAuditEventJson = auditEventJson.replace("\"get\"", "\"list\"");
         ContainerSpec spec = containerBuilder.newContainer(TEST_IMAGE)
                 .withName("floci-eks-cp-test-" + clusterName)
-                .withCmd(List.of("sh", "-c", "mkdir -p /var/log && echo '" + auditEventJson + "' >> /var/log/audit.log; sleep 30"))
+                .withCmd(List.of("sh", "-c", "mkdir -p /var/log && printf '%s\\n%s\\n' '" + auditEventJson + "' '"
+                        + secondAuditEventJson + "' >> /var/log/audit.log; sleep 30"))
                 .build();
 
         containerId = lifecycleManager.createAndStart(spec).containerId();
@@ -286,18 +289,17 @@ class EksControlPlaneLogsDockerIntegrationTest {
             try {
                 LogEventsResult result = cloudWatchLogsService.getLogEvents(
                         logGroup, streamName, null, null, 10, true, null, REGION);
-                if (!result.events().isEmpty()) {
-                    events = result.events();
+                events = result.events();
+                if (events.size() >= 2) {
                     break;
                 }
             } catch (Exception ignored) {
             }
             Thread.sleep(100);
         }
-        assertFalse(events.isEmpty(), "Expected audit log events in stream " + streamName);
-        assertTrue(events.stream().anyMatch(e -> e.getMessage().contains("\"kind\":\"Event\"")
-                        && e.getMessage().contains("\"apiVersion\":\"audit.k8s.io/v1\"")),
-                "Expected audit event containing kind Event and apiVersion audit.k8s.io/v1");
+        assertEquals(List.of(auditEventJson, secondAuditEventJson),
+                events.stream().map(LogEvent::getMessage).toList(),
+                "Each audit record should be exactly one CloudWatch Logs event");
 
         eksClusterManager.stopCluster(cluster);
         assertNull(eksClusterManager.getLogHandle(cluster), "Log handle should be removed after stop");
