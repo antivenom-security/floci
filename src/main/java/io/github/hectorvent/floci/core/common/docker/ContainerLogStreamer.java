@@ -106,17 +106,22 @@ public class ContainerLogStreamer {
             String accountId, String containerId, String logGroup, String logStream,
             String region, String logPrefix, Instant since) {
         ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
+        return follow(containerId, since, cloudWatchEmitter(accountId, logGroup, logStream, region, logPrefix, true));
+    }
 
-        // Trim trailing whitespace and drop blank lines, then fan each reassembled line out to the
-        // console logger and CloudWatch Logs.
-        Consumer<String> emitter = line -> {
+    // Trim trailing whitespace and drop blank lines, then fan each reassembled line out to
+    // CloudWatch Logs and, optionally, the console logger.
+    private Consumer<String> cloudWatchEmitter(String accountId, String logGroup, String logStream,
+                                               String region, String logPrefix, boolean logToConsole) {
+        return line -> {
             String trimmed = line.stripTrailing();
             if (!trimmed.isEmpty()) {
-                LOG.infov("[{0}] {1}", logPrefix, trimmed);
+                if (logToConsole) {
+                    LOG.infov("[{0}] {1}", logPrefix, trimmed);
+                }
                 forwardToCloudWatchLogs(accountId, logGroup, logStream, region, trimmed);
             }
         };
-        return follow(containerId, since, emitter);
     }
 
     /**
@@ -183,7 +188,7 @@ public class ContainerLogStreamer {
     /**
      * Returns an exec callback that always forwards to CloudWatch Logs.
      *
-     * @param logToConsole whether to also write each frame to the Floci console at INFO level
+     * @param logToConsole whether to also write each line to the Floci console at INFO level
      */
     public ResultCallback.Adapter<Frame> execLogCallbackForAccount(
             String accountId, String logGroup, String logStream, String region, String logPrefix,
@@ -192,28 +197,16 @@ public class ContainerLogStreamer {
     }
 
     /**
-     * Handles frames from Docker exec streams.
+     * Reassembles frames from Docker exec streams into lines, one CloudWatch event per line, as
+     * {@link #attach} does for container logs.
      *
      * @param accountId account that owns the destination log stream, or {@code null} for the
      *                  default account
      */
     private ResultCallback.Adapter<Frame> frameCallback(String accountId, String logGroup, String logStream,
                                                         String region, String logPrefix, boolean logToConsole) {
-        return new ResultCallback.Adapter<>() {
-            @Override
-            public void onNext(Frame frame) {
-                if (frame == null || frame.getPayload() == null) {
-                    return;
-                }
-                String line = new String(frame.getPayload(), StandardCharsets.UTF_8).stripTrailing();
-                if (!line.isEmpty()) {
-                    if (logToConsole) {
-                        LOG.infov("[{0}] {1}", logPrefix, line);
-                    }
-                    forwardToCloudWatchLogs(accountId, logGroup, logStream, region, line);
-                }
-            }
-        };
+        return new LogReassemblyCallback(
+                cloudWatchEmitter(accountId, logGroup, logStream, region, logPrefix, logToConsole));
     }
 
     /**
