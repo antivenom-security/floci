@@ -255,6 +255,8 @@ floci:
       enabled: true
     wafv2:
       enabled: true
+      logs:
+        interval: 300
     scheduler:
       enabled: true
     cloudwatchlogs:

@@ -1956,6 +1956,18 @@ public interface EmulatorConfig {
     interface WafV2ServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        WafV2LogsConfig logs();
+    }
+
+    interface WafV2LogsConfig {
+        /**
+         * Seconds each web ACL traffic-log file covers; a file is written when its interval ends.
+         *
+         * Env var: FLOCI_SERVICES_WAFV2_LOGS_INTERVAL
+         */
+        @WithDefault("300")
+        int interval();
     }
 
     interface SchedulerServiceConfig {

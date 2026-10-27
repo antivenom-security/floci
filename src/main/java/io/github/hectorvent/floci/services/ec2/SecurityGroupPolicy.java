@@ -104,7 +104,7 @@ public final class SecurityGroupPolicy {
         return false;
     }
 
-    static boolean inCidr(String address, String cidr) {
+    public static boolean inCidr(String address, String cidr) {
         if (address == null || cidr == null || address.contains("%") || cidr.contains("%")) {
             return false;
         }

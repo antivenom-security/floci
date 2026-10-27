@@ -4,7 +4,7 @@
 **Endpoint:** `http://localhost:4566/`
 **Target prefix:** `X-Amz-Target: AWSWAF_20190729.*`
 
-Floci emulates the AWS WAF v2 management API. Web ACLs, IP sets, regex pattern sets, rule groups, logging configurations, permission policies, tags, and resource associations are persisted in Floci's storage backend. Floci does not inspect or filter live traffic — this surface lets you create, read, update, and delete WAF resources and validate IaC (CloudFormation/CDK/Terraform) locally.
+Floci emulates the AWS WAF v2 management API. Web ACLs, IP sets, regex pattern sets, rule groups, logging configurations, permission policies, tags, and resource associations are persisted in Floci's storage backend. A web ACL associated with an Application Load Balancer inspects the requests the load balancer receives, and its logging configuration delivers AWS WAF logs; see [Inspecting Application Load Balancer traffic](#inspecting-application-load-balancer-traffic). Other resource types (API Gateway, AppSync, CloudFront, Cognito) are associated but not inspected.
 
 ## Supported Actions
 
@@ -60,6 +60,24 @@ WAF v2 resources are partitioned by `Scope`: `REGIONAL` (ALB, API Gateway, AppSy
 
 Every WAF v2 resource accepts at most 50 tags. `TagResource`, `CreateWebACL`, `CreateIPSet`, `CreateRegexPatternSet` and `CreateRuleGroup` reject a request that would leave the resource with more than 50 tags with `WAFLimitsExceededException`; overwriting an existing key does not count toward the limit. Tag keys must be 1-128 characters and values 0-256 characters, both limited to letters, numbers, spaces and `_ . : / = + - @`. An invalid key or value is rejected with `WAFInvalidParameterException` (`Field: TAGS`, or `TAG_KEYS` for `UntagResource`).
 
+## Inspecting Application Load Balancer traffic
+
+Each request an Application Load Balancer listener accepts is evaluated against the associated web ACL before the listener's rules, in rule priority order:
+
+- **Statements:** `IPSetReferenceStatement` (the client's source address), `ByteMatchStatement` (every `PositionalConstraint`), `RegexMatchStatement` and `SizeConstraintStatement` on `UriPath`, `QueryString`, `SingleHeader` or `Method`, `RateBasedStatement` with `AggregateKeyType` `IP` and an optional `ScopeDownStatement` (counted over `EvaluationWindowSec`, 300 by default), and `AndStatement`, `OrStatement` and `NotStatement`.
+- **Text transformations:** `NONE`, `LOWERCASE`, `UPPERCASE`, `URL_DECODE`, `HTML_ENTITY_DECODE`, `COMPRESS_WHITE_SPACE`, `REMOVE_WHITESPACE`, `TRIM`, `TRIM_LEFT`, `TRIM_RIGHT`, `REMOVE_NULLS`, `REPLACE_NULLS`, `REMOVE_COMMENTS_CHAR`, `REPLACE_COMMENTS`, `CMD_LINE`, `CMD_LINE_UNIX`, `NORMALIZE_PATH`, `NORMALIZE_PATH_WIN`, `BASE64_DECODE`, `HEX_DECODE`, `MD5` and `SHA256`, applied in `Priority` order to the component's bytes.
+- **Actions:** `Allow` and `Count`, and `Block`, which answers AWS's `403 Forbidden` page, or the `CustomResponse` status, headers and `CustomResponseBodies` body. Matching rules add their `RuleLabels` under the web ACL's label namespace. The default action applies when no rule terminates.
+- **Not evaluated:** a rule that uses any other statement, field, transformation or action (`ManagedRuleGroupStatement`, `RuleGroupReferenceStatement`, `GeoMatchStatement`, body inspection, `Captcha`, `Challenge`, forwarded-IP configuration, and so on) never matches. Floci logs one warning per web ACL. `CustomRequestHandling` is not applied.
+
+### Logs
+
+`PutLoggingConfiguration` with an S3 bucket (`arn:aws:s3:::aws-waf-logs-<suffix>[/<prefix>]`) or a CloudWatch Logs group (`arn:aws:logs:<region>:<account>:log-group:aws-waf-logs-<suffix>`) delivers one JSON record per inspected request in AWS's "Log fields for protection pack (web ACL) traffic" format, with the keys in the order of AWS's examples: `timestamp`, `formatVersion`, `webaclId`, `terminatingRuleId`, `terminatingRuleType`, `action`, `terminatingRuleMatchDetails`, `httpSourceName` (`ALB`), `httpSourceId` (`<account>-app/<name>/<id>`), `ruleGroupList`, `rateBasedRuleList`, `nonTerminatingMatchingRules`, `requestHeadersInserted`, `responseCodeSent`, `httpRequest` (client IP, `country` `-`, headers, URI, query string, HTTP version, method, and the trace ID as `requestId`) and `labels`. Destinations not named `aws-waf-logs-*`, and Firehose streams, receive nothing.
+
+- S3 files are gzipped at `[prefix/]AWSLogs/<account>/WAFLogs/<region>/<web-acl-name>/YYYY/MM/dd/HH/mm/<account>_waflogs_<region>_<web-acl-name>_<YYYYMMddTHHmmZ>_<hash>.log.gz`, one per interval (`FLOCI_SERVICES_WAFV2_LOGS_INTERVAL`, 300 seconds as on AWS), dated by the interval's start and written when it ends.
+- CloudWatch Logs events go to the existing log group's `<region>_<web-acl-name>_0` stream, on the same tick.
+- `LoggingFilter` keeps or drops records by `ActionCondition` (the terminating action or a `COUNT` match) and `LabelNameCondition`; the first filter whose conditions are met decides. `RedactedFields` `UriPath`, `QueryString`, `Method` and `SingleHeader` are logged as `REDACTED`.
+- Floci delivers without checking or adding the bucket policy or log group resource policy that AWS creates for `delivery.logs.amazonaws.com`.
+
 ## Example
 
 ```bash
@@ -78,4 +96,15 @@ aws wafv2 create-web-acl \
   --visibility-config SampledRequestsEnabled=true,CloudWatchMetricsEnabled=true,MetricName=demo
 
 aws wafv2 list-web-acls --scope REGIONAL
+
+# Inspect an Application Load Balancer's traffic and log it to S3
+aws wafv2 associate-web-acl --web-acl-arn "$ACL_ARN" --resource-arn "$ALB_ARN"
+aws wafv2 put-logging-configuration --logging-configuration \
+  "ResourceArn=$ACL_ARN,LogDestinationConfigs=arn:aws:s3:::aws-waf-logs-demo"
 ```
+
+## Configuration
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_WAFV2_LOGS_INTERVAL` | `300` | Seconds each WAF traffic-log file covers, as AWS's 5 minutes |
