@@ -470,7 +470,7 @@ public class SigninService {
      * True when {@code host} is the AWS Sign-In host of one of {@code partition}'s regions. The
      * authorize request is an unsigned browser navigation, so the partition is the deployment's.
      */
-    private static boolean isSigninHost(String host, AwsPartition partition) {
+    static boolean isSigninHost(String host, AwsPartition partition) {
         if (host == null) {
             return false;
         }

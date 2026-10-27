@@ -1,9 +1,10 @@
 {
-  "_source": "Hand-maintained. readOnly values the operation-name prefix rule gets wrong. KMS: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-management-events-with-cloudtrail.html; Secrets Manager: https://aws.amazon.com/blogs/compute/using-api-destinations-with-amazon-eventbridge/ (read management event). STS: AssumeRole records in invictus-ir/aws_dataset and OpenTelemetry collector-contrib awslogsencodingextension testdata are readOnly true and keep responseElements. responseKept lists the read-only operations whose records keep responseElements. Production samples correct the rest.",
+  "_source": "Hand-maintained. readOnly values the operation-name prefix rule gets wrong. KMS: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/logging-management-events-with-cloudtrail.html; Secrets Manager: https://aws.amazon.com/blogs/compute/using-api-destinations-with-amazon-eventbridge/ (read management event). Sign-in: the GetSigninToken and CheckMfa examples at https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-aws-console-sign-in-events.html are readOnly false. STS: AssumeRole records in invictus-ir/aws_dataset and OpenTelemetry collector-contrib awslogsencodingextension testdata are readOnly true and keep responseElements. responseKept lists the read-only operations whose records keep responseElements. Production samples correct the rest.",
   "overrides": {
     "kms.amazonaws.com": {"Decrypt": true, "Encrypt": true, "GenerateDataKey": true},
     "secretsmanager.amazonaws.com": {"GetSecretValue": true},
     "s3.amazonaws.com": {"SelectObjectContent": true},
+    "signin.amazonaws.com": {"CheckMfa": false, "GetSigninToken": false},
     "sts.amazonaws.com": {"AssumeRole": true, "AssumeRoleWithSAML": true, "AssumeRoleWithWebIdentity": true}
   },
   "responseKept": {

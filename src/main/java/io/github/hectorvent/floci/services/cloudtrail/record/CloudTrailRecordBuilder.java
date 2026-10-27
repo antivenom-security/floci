@@ -41,7 +41,8 @@ import java.util.regex.Pattern;
 public class CloudTrailRecordBuilder {
 
     public static final String EVENT_VERSION = "1.11";
-    static final String HIDDEN = "HIDDEN_DUE_TO_SECURITY_REASONS";
+    public static final String CONSOLE_SIGN_IN = "AwsConsoleSignIn";
+    public static final String HIDDEN = "HIDDEN_DUE_TO_SECURITY_REASONS";
     static final int MAX_PARAMETERS_BYTES = 100 * 1024;
     static final int MAX_FIELD_BYTES = 1024;
 
@@ -80,9 +81,9 @@ public class CloudTrailRecordBuilder {
         record.put("userAgent", truncate(event.userAgent() == null ? "" : event.userAgent()));
         if (event.errorCode() != null) {
             record.put("errorCode", truncate(event.errorCode()));
-            if (event.errorMessage() != null) {
-                record.put("errorMessage", truncate(event.errorMessage()));
-            }
+        }
+        if (event.errorMessage() != null) {
+            record.put("errorMessage", truncate(event.errorMessage()));
         }
         putParameters(record, "requestParameters", event.requestParameters());
         putParameters(record, "responseElements",
@@ -91,14 +92,19 @@ public class CloudTrailRecordBuilder {
         if (event.additionalEventData() != null) {
             record.set("additionalEventData", event.additionalEventData());
         }
-        record.put("requestID", truncate(event.requestId() == null ? UUID.randomUUID().toString() : event.requestId()));
+        String eventType = event.eventType() == null ? "AwsApiCall" : event.eventType();
+        // AWS's console sign-in records carry no requestID.
+        if (!CONSOLE_SIGN_IN.equals(eventType)) {
+            record.put("requestID", truncate(event.requestId() == null ? UUID.randomUUID().toString()
+                    : event.requestId()));
+        }
         record.put("eventID", UUID.randomUUID().toString());
         record.put("readOnly", readOnly);
         ArrayNode resources = event.resources() != null ? event.resources() : resources(event);
         if (resources != null && !resources.isEmpty()) {
             record.set("resources", resources);
         }
-        record.put("eventType", "AwsApiCall");
+        record.put("eventType", eventType);
         JsonNode apiVersion = RESOURCES.path("apiVersions").get(event.eventSource());
         if (apiVersion != null) {
             record.put("apiVersion", apiVersion.asText());

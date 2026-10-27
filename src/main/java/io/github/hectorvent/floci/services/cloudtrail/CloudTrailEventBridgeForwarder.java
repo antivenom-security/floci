@@ -60,6 +60,7 @@ public class CloudTrailEventBridgeForwarder implements Resettable {
         String detailType = switch (record.path("eventType").asText()) {
             case "AwsApiCall" -> "AWS API Call via CloudTrail";
             case "AwsServiceEvent" -> "AWS Service Event via CloudTrail";
+            case "AwsConsoleSignIn" -> "AWS Console Sign In via CloudTrail";
             default -> null;
         };
         if (detailType == null) {

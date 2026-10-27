@@ -10,7 +10,7 @@ import java.time.Instant;
  * What {@link CloudTrailRecordBuilder} builds one record from. {@code requestParameters} and
  * {@code responseElements} are already in CloudTrail's form (see
  * {@link CloudTrailRecordBuilder#parameters}). {@code resources} left null are taken from the
- * vendored resources table.
+ * vendored resources table. {@code eventType} left null is {@code AwsApiCall}.
  */
 public record CloudTrailEvent(
         String eventSource,
@@ -28,7 +28,8 @@ public record CloudTrailEvent(
         String requestId,
         ArrayNode resources,
         TlsDetails tlsDetails,
-        String recipientAccountId) {
+        String recipientAccountId,
+        String eventType) {
 
     public static Builder builder() {
         return new Builder();
@@ -51,6 +52,7 @@ public record CloudTrailEvent(
         private ArrayNode resources;
         private TlsDetails tlsDetails;
         private String recipientAccountId;
+        private String eventType;
 
         public Builder eventSource(String v) { this.eventSource = v; return this; }
         public Builder eventName(String v) { this.eventName = v; return this; }
@@ -68,11 +70,12 @@ public record CloudTrailEvent(
         public Builder resources(ArrayNode v) { this.resources = v; return this; }
         public Builder tlsDetails(TlsDetails v) { this.tlsDetails = v; return this; }
         public Builder recipientAccountId(String v) { this.recipientAccountId = v; return this; }
+        public Builder eventType(String v) { this.eventType = v; return this; }
 
         public CloudTrailEvent build() {
             return new CloudTrailEvent(eventSource, eventName, awsRegion, eventTime, userIdentity,
                     sourceIPAddress, userAgent, errorCode, errorMessage, requestParameters, responseElements,
-                    additionalEventData, requestId, resources, tlsDetails, recipientAccountId);
+                    additionalEventData, requestId, resources, tlsDetails, recipientAccountId, eventType);
         }
     }
 }

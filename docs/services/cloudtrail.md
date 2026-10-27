@@ -131,6 +131,26 @@ Basic selectors honor `IncludeManagementEvents`, `ReadWriteType` and
 `NextToken`, and answers `ThrottlingException` past
 `lookup-rate-limit-per-second` calls per second per account and region.
 
+### Console sign-in events
+
+IAM's [console sign-in](iam.md#console-sign-in) endpoints record `signin.amazonaws.com` events
+with `eventType` `AwsConsoleSignIn`, `requestParameters` `null` and no `requestID`, as AWS's
+console sign-in examples do:
+
+- `ConsoleLogin`, with `responseElements` `{"ConsoleLogin": "Success"}` or `"Failure"` and
+  `errorMessage` `Failed authentication` on failure. `additionalEventData` has `LoginTo` (password
+  sign-in only), `MobileVersion` `No`, `MFAUsed` and, after an MFA code, `MFAIdentifier`.
+- A signed-in IAM user is `{type, principalId, arn, accountId, userName}`. A failed attempt has no
+  `arn` and an empty `accessKeyId`, and an unknown user name reads `HIDDEN_DUE_TO_SECURITY_REASONS`.
+  A federated sign-in is the session's `AssumedRole` or `FederatedUser` identity.
+- `CheckMfa` when the password is right and the user has an MFA device. Without an MFA code no
+  `ConsoleLogin` follows, as when the console's MFA prompt is left unanswered.
+- `GetSigninToken` when the federation endpoint issues a sign-in token.
+
+The region is the one in a regional sign-in host (`us-west-2.signin.aws.amazon.com`), otherwise
+the partition's global region, `us-east-1` in `aws`. They reach EventBridge as
+`AWS Console Sign In via CloudTrail` from `aws.signin`.
+
 ### EventBridge
 
 A management or S3 data event that a logging trail covers also goes to the
@@ -154,6 +174,7 @@ Known gaps:
 - A Query form `POST` without a `Content-Length` or over 256 KB is not
   recorded, since naming its operation would buffer the body.
 - Lambda URL and Lambda Web execution roles are not recorded.
+- `aws login` records nothing. AWS records `AuthorizeOAuth2Access` and `CreateOAuth2Token`.
 
 ## S3 Hook Coverage
 
