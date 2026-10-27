@@ -31,6 +31,34 @@ The CLI prints the authorize URL and waits for a code. After the consent page, F
 verification code to paste back. The redirect must point at the endpoint the request arrived on
 or at the AWS Sign-In host of a region in the deployment's partition; any other origin is refused.
 
+## Console sign-in
+
+Floci has no console, but it signs IAM users and role sessions in the way the console does, and
+records each attempt as CloudTrail does (see [CloudTrail](cloudtrail.md#console-sign-in-events)).
+
+**Password sign-in** is Floci's own endpoint, standing in for the console sign-in page:
+
+```bash
+curl -s http://localhost:4566/_floci/signin/console \
+  -d account=000000000000 -d username=alice -d password='Passw0rd!' -d mfa_code=123456
+# {"ConsoleLogin":"Success"}
+```
+
+`account` is the account ID or its alias. The password is the user's login profile
+(`CreateLoginProfile`). A user with an MFA device must send its current code as `mfa_code`. The
+answer is `200 {"ConsoleLogin":"Success"}` or `401 {"ConsoleLogin":"Failure"}`. Root has no
+password in Floci and cannot sign in.
+
+**Federation** is AWS's custom identity broker endpoint, `GET` or `POST /federation`:
+
+- `Action=getSigninToken&Session=<json>` takes the `sessionId`, `sessionKey` and `sessionToken` of
+  an `AssumeRole` or `GetFederationToken` session, and an optional `SessionDuration` (900 to
+  43200, role sessions only), and answers `{"SigninToken": "..."}`.
+- `Action=login&SigninToken=<token>&Destination=<url>` redeems the token once, within 15 minutes and
+  while the session lasts, with a `302` to `Destination`.
+
+Anything else is a `400`.
+
 ## Supported Actions
 
 ### Users

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.signin.model.AuthorizationRequest;
 import io.github.hectorvent.floci.services.signin.model.TokenResult;
+import io.vertx.core.http.HttpServerRequest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.FormParam;
@@ -23,22 +24,30 @@ import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.core.UriInfo;
 
 import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-/** AWS Sign-In data-plane endpoints used by the CLI login credentials provider. */
+/**
+ * AWS Sign-In data-plane endpoints used by the CLI login credentials provider, the federation
+ * endpoint of AWS's custom identity broker, and Floci's console password sign-in.
+ */
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
 public class SigninController {
 
     private final SigninService signinService;
+    private final ConsoleSigninService consoleSignin;
     private final ObjectReader tokenRequestReader;
 
     @Inject
-    public SigninController(SigninService signinService, ObjectMapper objectMapper) {
+    public SigninController(SigninService signinService, ConsoleSigninService consoleSignin,
+                            ObjectMapper objectMapper) {
         this.signinService = signinService;
+        this.consoleSignin = consoleSignin;
         this.tokenRequestReader = objectMapper.reader()
                 .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     }
@@ -207,6 +216,73 @@ public class SigninController {
             response.put("idToken", result.idToken());
         }
         return Response.ok(response).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    /**
+     * Floci's stand-in for the console's password sign-in page: answers 200 or 401 with
+     * {@code {"ConsoleLogin": "Success"|"Failure"}} and records the attempt as AWS does.
+     */
+    @POST
+    @Path("/_floci/signin/console")
+    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
+    public Response consoleLogin(@FormParam("account") String account,
+                                 @FormParam("username") String username,
+                                 @FormParam("password") String password,
+                                 @FormParam("mfa_code") String mfaCode,
+                                 @Context HttpServerRequest request) {
+        boolean success = consoleSignin.consoleLogin(account, username, password, mfaCode, request);
+        return Response.status(success ? Response.Status.OK : Response.Status.UNAUTHORIZED)
+                .entity(Map.of("ConsoleLogin", success ? ConsoleSigninService.SUCCESS : ConsoleSigninService.FAILURE))
+                .type(MediaType.APPLICATION_JSON)
+                .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .build();
+    }
+
+    @GET
+    @Path("/federation")
+    public Response federation(@QueryParam("Action") String action,
+                               @QueryParam("Session") String session,
+                               @QueryParam("SessionDuration") String sessionDuration,
+                               @QueryParam("SigninToken") String signinToken,
+                               @QueryParam("Destination") String destination,
+                               @Context HttpServerRequest request) {
+        return federationAction(action, session, sessionDuration, signinToken, destination, request);
+    }
+
+    @POST
+    @Path("/federation")
+    @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
+    public Response federationForm(@FormParam("Action") String action,
+                                   @FormParam("Session") String session,
+                                   @FormParam("SessionDuration") String sessionDuration,
+                                   @FormParam("SigninToken") String signinToken,
+                                   @FormParam("Destination") String destination,
+                                   @Context HttpServerRequest request) {
+        return federationAction(action, session, sessionDuration, signinToken, destination, request);
+    }
+
+    private Response federationAction(String action, String session, String sessionDuration, String signinToken,
+                                      String destination, HttpServerRequest request) {
+        if ("getSigninToken".equals(action)) {
+            String token = consoleSignin.getSigninToken(session, sessionDuration, request);
+            return token == null ? Response.status(Response.Status.BAD_REQUEST).build()
+                    : Response.ok(Map.of("SigninToken", token)).type(MediaType.APPLICATION_JSON)
+                    .header(HttpHeaders.CACHE_CONTROL, "no-store").build();
+        }
+        if ("login".equals(action) && isHttpUrl(destination) && consoleSignin.login(signinToken, request)) {
+            return redirect(destination);
+        }
+        return Response.status(Response.Status.BAD_REQUEST).build();
+    }
+
+    private static boolean isHttpUrl(String value) {
+        try {
+            URI uri = value == null ? null : new URI(value);
+            return uri != null && uri.getHost() != null
+                    && ("https".equalsIgnoreCase(uri.getScheme()) || "http".equalsIgnoreCase(uri.getScheme()));
+        } catch (URISyntaxException e) {
+            return false;
+        }
     }
 
     private Map<String, String> parseBody(String body, String contentType) {

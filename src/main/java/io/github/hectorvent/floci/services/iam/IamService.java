@@ -2557,6 +2557,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return accountAliases.get(ACCOUNT_ALIAS_KEY);
     }
 
+    /** The account that holds {@code alias}, which is how a console sign-in page names an account. */
+    public Optional<String> findAccountByAlias(String alias) {
+        if (alias == null || !(accountAliases instanceof AccountAwareStorageBackend<String> aware)) {
+            return Optional.empty();
+        }
+        return aware.scanAllAccountEntries(ACCOUNT_ALIAS_KEY::equals).stream()
+                .filter(entry -> alias.equals(entry.value()))
+                .map(AccountAwareStorageBackend.AccountEntry::accountId)
+                .findFirst();
+    }
+
     /**
      * An account holds one alias, and AWS enforces that by replacement rather than rejection:
      * creating a free alias while another is set silently swaps it. {@code EntityAlreadyExists}
