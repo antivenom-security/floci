@@ -4,9 +4,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsProxyServer;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
 import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.services.cloudtrail.record.TlsDetails;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
@@ -24,6 +26,7 @@ import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
+import io.vertx.core.http.HttpConnection;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
@@ -34,23 +37,28 @@ import io.vertx.core.http.RequestOptions;
 import io.vertx.core.net.NetSocket;
 import io.vertx.core.net.PemKeyCertOptions;
 import io.vertx.core.net.SSLOptions;
+import io.vertx.core.net.SocketAddress;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import javax.naming.InvalidNameException;
 import javax.naming.ldap.LdapName;
 import javax.naming.ldap.Rdn;
+import javax.net.ssl.SSLSession;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
@@ -68,6 +76,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -114,6 +123,13 @@ public class ElbV2DataPlane {
 
     @Inject
     ObjectMapper objectMapper;
+
+    @Inject
+    ElbV2AccessLogWriter accessLogs;
+
+    /** Left null, like {@link #accessLogs}, by the unit tests that build the data plane by hand. */
+    @Inject
+    Instance<ElbV2RequestInspector> inspectors;
 
     private final Map<Integer, HttpServer> servers = new ConcurrentHashMap<>();
     private final Map<Integer, PortState> portStates = new ConcurrentHashMap<>();
@@ -187,6 +203,7 @@ public class ElbV2DataPlane {
     private final Map<String, AtomicInteger> rrCounters = new ConcurrentHashMap<>();
     private final Map<String, String> listenerRegions = new ConcurrentHashMap<>();
     private final ElbV2StickyCookie stickyCookie = new ElbV2StickyCookie();
+    private final Map<HttpConnection, String> connectionTraceIds = new ConcurrentHashMap<>();
 
     private HttpClient proxyClient;
 
@@ -227,6 +244,7 @@ public class ElbV2DataPlane {
         ruleChains.clear();
         rrCounters.clear();
         listenerRegions.clear();
+        connectionTraceIds.clear();
     }
 
     boolean publishListener(Listener listener, String region, Integer previousPort,
@@ -484,6 +502,10 @@ public class ElbV2DataPlane {
         long generation = ++state.generation;
         servers.put(port, server);
         try {
+            server.connectionHandler(connection -> {
+                connectionTraceIds.put(connection, ElbV2AccessLogEntry.newConnTraceId());
+                connection.closeHandler(ignored -> connectionTraceIds.remove(connection));
+            });
             server.requestHandler(req -> handleRequest(req, port));
             server.listen()
                     .onSuccess(s -> LOG.infov("ELBv2 {0} listener port started on {1}",
@@ -788,17 +810,109 @@ public class ElbV2DataPlane {
         PortState state = portStates.get(port);
         RoutingView routing = state == null ? null : state.routing;
         RoutedListener listener = routing == null ? null : resolveListener(routing, req.host());
-        if (listener == null) {
+        ListenerBinding binding = listener == null ? null : listenerBindings.get(listener.arn());
+        if (binding == null) {
             req.response().setStatusCode(502).end("No listener for host");
             return;
         }
+        ElbV2AccessLogEntry log = startLog(req, listener, binding, port);
+        for (ElbV2RequestInspector inspector : inspectors != null ? inspectors : List.<ElbV2RequestInspector>of()) {
+            ElbV2RequestInspector.Response response =
+                    inspector.inspect(req, listener.region(), binding.loadBalancerArn(), log.actions);
+            if (response != null) {
+                req.response().setStatusCode(response.statusCode());
+                response.headers().forEach(req.response()::putHeader);
+                req.response().end(response.body() != null ? response.body() : "");
+                return;
+            }
+        }
         for (CompiledRule compiled : listener.chain()) {
             if (compiled.matches(req)) {
-                executeAction(req, compiled.action, listener.region(), listener.arn());
+                log.matchedRulePriority = compiled.rule.isDefault() ? "0" : compiled.rule.getPriority();
+                executeAction(req, compiled.action, listener.region(), listener.arn(), log);
                 return;
             }
         }
         req.response().setStatusCode(502).end("No matching rule");
+    }
+
+    /**
+     * Starts the request's access-log entry and completes it when the response ends. The load
+     * balancer adds or updates the request's {@code X-Amzn-Trace-Id}, as AWS does, so the target and
+     * the entry see the same trace.
+     */
+    private ElbV2AccessLogEntry startLog(HttpServerRequest req, RoutedListener listener, ListenerBinding binding,
+                                         int port) {
+        Instant now = Instant.now();
+        ElbV2AccessLogEntry log = new ElbV2AccessLogEntry(binding.loadBalancerArn(), listener.region(), now,
+                System.nanoTime());
+        boolean secure = binding.secure();
+        log.type = secure ? (req.version() == HttpVersion.HTTP_2 ? "h2" : "https") : "http";
+        log.client = address(req.remoteAddress());
+        log.nodeIp = req.localAddress() != null ? req.localAddress().hostAddress() : null;
+        String host = req.host() != null ? req.host() : log.nodeIp;
+        int colon = host.lastIndexOf(':');
+        if (colon > host.lastIndexOf(']')) {
+            host = host.substring(0, colon);
+        }
+        log.requestLine = ElbV2AccessLogEntry.requestLine(req.method(), secure, host, port, req.uri(), req.version());
+        log.userAgent(req.getHeader("User-Agent"));
+        log.requestHeadBytes = ElbV2AccessLogEntry.headBytes(
+                req.method().name() + " " + req.uri() + " HTTP/1.1", req.headers());
+        log.traceId = ElbV2AccessLogEntry.traceIdHeader(req.getHeader("X-Amzn-Trace-Id"), now);
+        req.headers().set("X-Amzn-Trace-Id", log.traceId);
+        log.connTraceId = connectionTraceIds.get(req.connection());
+        String[] classification = ElbV2AccessLogEntry.classify(req.method(), req.headers());
+        if (classification != null) {
+            log.classification = classification[0];
+            log.classificationReason = classification[1];
+        }
+        if (secure && req.sslSession() != null) {
+            SSLSession session = req.sslSession();
+            log.sslCipher = TlsDetails.openSslName(session.getCipherSuite());
+            log.sslProtocol = session.getProtocol();
+            String sni = normalizeHost(req.connection().indicatedServerName());
+            if (binding.certificateHosts().stream().anyMatch(h -> h.equals(sni) || wildcardMatches(h, sni))) {
+                log.domainName = sni;
+            }
+            log.chosenCertArn = presentedCertificate(session, binding);
+        }
+        req.response().bodyEndHandler(ignored -> {
+            if (!log.tunneled) {
+                finishLog(log, req.response().getStatusCode(), log.requestHeadBytes + req.bytesRead(),
+                        ElbV2AccessLogEntry.headBytes("HTTP/1.1 " + req.response().getStatusCode() + " "
+                                + req.response().getStatusMessage(), req.response().headers())
+                                + req.response().bytesWritten());
+            }
+        });
+        return log;
+    }
+
+    private void finishLog(ElbV2AccessLogEntry log, int status, long receivedBytes, long sentBytes) {
+        if (!log.complete(Instant.now(), status, receivedBytes, sentBytes)) {
+            return;
+        }
+        LoadBalancer loadBalancer = elbV2Service.getLoadBalancer(log.region, log.loadBalancerArn);
+        if (loadBalancer != null && accessLogs != null) {
+            accessLogs.record(loadBalancer, log);
+        }
+    }
+
+    private static String presentedCertificate(SSLSession session, ListenerBinding binding) {
+        Certificate[] presented = session.getLocalCertificates();
+        if (presented == null || presented.length == 0) {
+            return null;
+        }
+        for (CertificateMaterial certificate : binding.certificates()) {
+            if (Pem.parseCertificate(certificate.certificateBody()).equals(presented[0])) {
+                return certificate.arn();
+            }
+        }
+        return null;
+    }
+
+    private static String address(SocketAddress address) {
+        return address == null ? null : address.hostAddress() + ":" + address.port();
     }
 
     /** Floci's shared socket first uses load-balancer DNS, then unique rule or certificate hosts. */
@@ -845,20 +959,23 @@ public class ElbV2DataPlane {
         return normalized;
     }
 
-    private void executeAction(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn) {
+    private void executeAction(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn,
+                               ElbV2AccessLogEntry log) {
         if (action == null) {
             req.response().setStatusCode(502).end("No action");
             return;
         }
         switch (action.getType() != null ? action.getType() : "") {
-            case "forward" -> executeForward(req, action, region, listenerArn);
-            case "redirect" -> executeRedirect(req, action);
-            case "fixed-response" -> executeFixedResponse(req, action);
+            case "forward" -> executeForward(req, action, region, listenerArn, log);
+            case "redirect" -> executeRedirect(req, action, log);
+            case "fixed-response" -> executeFixedResponse(req, action, log);
             default -> req.response().setStatusCode(502).end("Unsupported action type");
         }
     }
 
-    private void executeForward(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn) {
+    private void executeForward(io.vertx.core.http.HttpServerRequest req, Action action, String region, String listenerArn,
+                                ElbV2AccessLogEntry log) {
+        log.actions.add("forward");
         String tgArn = resolveTgArn(action);
         if (tgArn == null) {
             req.response().setStatusCode(502).end("No target group");
@@ -869,9 +986,11 @@ public class ElbV2DataPlane {
             req.response().setStatusCode(502).end("Target group not found");
             return;
         }
+        log.targetGroupArn = tgArn;
 
         if ("lambda".equals(tg.getTargetType())) {
             if (isWebSocketUpgrade(req)) {
+                log.errorReason = "LambdaWebsocketNotSupported";
                 req.response().setStatusCode(400).end("WebSockets are not supported for Lambda targets");
                 return;
             }
@@ -881,7 +1000,7 @@ public class ElbV2DataPlane {
                 return;
             }
             String functionArn = targets.get(0).getId();
-            invokeLambdaTarget(req, functionArn, region);
+            invokeLambdaTarget(req, functionArn, region, log);
             return;
         }
 
@@ -909,10 +1028,10 @@ public class ElbV2DataPlane {
         boolean preserveHostHeader = Boolean.parseBoolean(
                 loadBalancerAttribute(listenerArn, region, PRESERVE_HOST_HEADER_ATTRIBUTE));
         if (isWebSocketUpgrade(req)) {
-            proxyUpgrade(req, host, targetPort, preserveHostHeader, idleTimeoutMillis(listenerArn, region), cookies);
+            proxyUpgrade(req, host, targetPort, preserveHostHeader, idleTimeoutMillis(listenerArn, region), cookies, log);
             return;
         }
-        proxyRequest(req, host, targetPort, preserveHostHeader, cookies);
+        proxyRequest(req, host, targetPort, preserveHostHeader, cookies, log);
     }
 
     private String loadBalancerAttribute(String listenerArn, String region, String key) {
@@ -940,9 +1059,10 @@ public class ElbV2DataPlane {
         return Math.max(1, seconds) * 1000;
     }
 
-    private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region) {
+    private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region,
+                                    ElbV2AccessLogEntry log) {
         if (req.isEnded()) {
-            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer());
+            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer(), log);
             return;
         }
         ByteArrayOutputStream body = new ByteArrayOutputStream();
@@ -953,6 +1073,7 @@ public class ElbV2DataPlane {
             }
             if (body.size() > MAX_LAMBDA_BODY_BYTES - chunk.length()) {
                 rejected.set(true);
+                log.errorReason = "LambdaRequestTooLarge";
                 req.response().setStatusCode(413).end();
                 return;
             }
@@ -967,13 +1088,14 @@ public class ElbV2DataPlane {
             if (rejected.get()) {
                 return;
             }
-            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer(body.toByteArray()));
+            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer(body.toByteArray()), log);
         });
     }
 
     private void invokeLambdaWithBody(io.vertx.core.http.HttpServerRequest req, String functionArn,
-                                      String region, Buffer body) {
+                                      String region, Buffer body, ElbV2AccessLogEntry log) {
         Map<String, Object> event = buildAlbEvent(req, body);
+        log.dispatched();
         // Lambda invocation is synchronous and may take seconds while a cold container
         // boots and polls the Runtime API. The Runtime API itself runs on Vert.x event
         // loops, so blocking the listener's event loop here would deadlock the runtime
@@ -983,25 +1105,33 @@ public class ElbV2DataPlane {
             byte[] payload = objectMapper.writeValueAsBytes(event);
             return lambdaService.invoke(region, functionArn, payload, InvocationType.RequestResponse);
         }, false).onSuccess(result -> {
+            log.responded(null);
+            log.responding();
             try {
-                writeLambdaResponse(req, result);
+                writeLambdaResponse(req, result, log);
             } catch (Exception e) {
                 LOG.errorf(e, "Error writing Lambda response for %s", functionArn);
+                log.errorReason = "LambdaInvalidResponse";
                 req.response().setStatusCode(502).end("Lambda invocation error");
             }
         }).onFailure(e -> {
             LOG.errorf(e, "Error invoking Lambda target %s", functionArn);
+            log.errorReason = e instanceof AwsException aws && "ResourceNotFoundException".equals(aws.getErrorCode())
+                    ? "LambdaResourceNotFound" : "LambdaServiceException";
             req.response().setStatusCode(502).end("Lambda invocation error");
         });
     }
 
-    private void writeLambdaResponse(io.vertx.core.http.HttpServerRequest req, InvokeResult result) throws java.io.IOException {
+    private void writeLambdaResponse(io.vertx.core.http.HttpServerRequest req, InvokeResult result,
+                                     ElbV2AccessLogEntry log) throws java.io.IOException {
         if (result.getFunctionError() != null) {
+            log.errorReason = "LambdaUnhandled";
             req.response().setStatusCode(502).end("Lambda function error: " + result.getFunctionError());
             return;
         }
 
         if (result.getPayload() == null || result.getPayload().length == 0) {
+            log.targetStatusCode = "200";
             req.response().setStatusCode(200).end();
             return;
         }
@@ -1016,12 +1146,14 @@ public class ElbV2DataPlane {
             if (Boolean.TRUE.equals(isBase64)) {
                 decodedBody = Base64.getDecoder().decode(String.valueOf(responseBody));
                 if (decodedBody.length > MAX_LAMBDA_BODY_BYTES) {
+                    log.errorReason = "LambdaResponseTooLarge";
                     req.response().setStatusCode(502).end();
                     return;
                 }
             } else {
                 textBody = String.valueOf(responseBody);
                 if (textBody.getBytes(StandardCharsets.UTF_8).length > MAX_LAMBDA_BODY_BYTES) {
+                    log.errorReason = "LambdaResponseTooLarge";
                     req.response().setStatusCode(502).end();
                     return;
                 }
@@ -1033,6 +1165,7 @@ public class ElbV2DataPlane {
         if (sc != null) {
             statusCode = ((Number) sc).intValue();
         }
+        log.targetStatusCode = String.valueOf(statusCode);
         req.response().setStatusCode(statusCode);
 
         Object headers = lambdaResp.get("headers");
@@ -1132,18 +1265,19 @@ public class ElbV2DataPlane {
     }
 
     private void proxyRequest(io.vertx.core.http.HttpServerRequest req, String host, int port,
-                              boolean preserveHostHeader, List<String> cookies) {
+                              boolean preserveHostHeader, List<String> cookies, ElbV2AccessLogEntry log) {
         req.pause();
         if (ElbV2TargetResolver.isIpLiteral(host)) {
             try {
-                proxyRequestTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port, preserveHostHeader, cookies);
+                proxyRequestTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port, preserveHostHeader,
+                        cookies, log);
             } catch (IOException e) {
                 rejectTarget(req, host, e);
             }
             return;
         }
         vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
-                .onSuccess(address -> proxyRequestTo(req, address, host, port, preserveHostHeader, cookies))
+                .onSuccess(address -> proxyRequestTo(req, address, host, port, preserveHostHeader, cookies, log))
                 .onFailure(err -> rejectTarget(req, host, err));
     }
 
@@ -1154,7 +1288,8 @@ public class ElbV2DataPlane {
     }
 
     private void proxyRequestTo(HttpServerRequest req, String address, String host, int port,
-                                boolean preserveHostHeader, List<String> cookies) {
+                                boolean preserveHostHeader, List<String> cookies, ElbV2AccessLogEntry log) {
+        log.target = address + ":" + port;
         RequestOptions opts = new RequestOptions()
                 .setHost(address)
                 .setPort(port)
@@ -1177,12 +1312,14 @@ public class ElbV2DataPlane {
                             return;
                         }
                         responseStarted.set(true);
+                        log.responded(String.valueOf(resp.statusCode()));
                         req.response().setStatusCode(resp.statusCode());
                         copyTargetResponseHeaders(resp.headers(), req.response());
                         cookies.forEach(cookie -> req.response().headers().add("Set-Cookie", cookie));
                         if (resp.getHeader("Content-Length") == null) {
                             req.response().setChunked(true);
                         }
+                        log.responding();
                         resp.pipeTo(req.response());
                         resp.exceptionHandler(error -> {
                             if (req.response().headWritten()) {
@@ -1203,6 +1340,7 @@ public class ElbV2DataPlane {
                         });
                     });
 
+                    log.dispatched();
                     clientReq.send(req);
                     req.resume();
                 })
@@ -1243,12 +1381,12 @@ public class ElbV2DataPlane {
     }
 
     private void proxyUpgrade(HttpServerRequest req, String host, int port, boolean preserveHostHeader,
-                              long idleTimeoutMillis, List<String> cookies) {
+                              long idleTimeoutMillis, List<String> cookies, ElbV2AccessLogEntry log) {
         req.pause();
         if (ElbV2TargetResolver.isIpLiteral(host)) {
             try {
                 proxyUpgradeTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port,
-                        preserveHostHeader, idleTimeoutMillis, cookies);
+                        preserveHostHeader, idleTimeoutMillis, cookies, log);
             } catch (IOException e) {
                 rejectTarget(req, host, e);
             }
@@ -1256,7 +1394,7 @@ public class ElbV2DataPlane {
         }
         vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
                 .onSuccess(address -> proxyUpgradeTo(req, address, host, port, preserveHostHeader,
-                        idleTimeoutMillis, cookies))
+                        idleTimeoutMillis, cookies, log))
                 .onFailure(err -> rejectTarget(req, host, err));
     }
 
@@ -1266,7 +1404,9 @@ public class ElbV2DataPlane {
      * the target refused the upgrade and is relayed as an ordinary response.
      */
     private void proxyUpgradeTo(HttpServerRequest req, String address, String host, int port,
-                                boolean preserveHostHeader, long idleTimeoutMillis, List<String> cookies) {
+                                boolean preserveHostHeader, long idleTimeoutMillis, List<String> cookies,
+                                ElbV2AccessLogEntry log) {
+        log.target = address + ":" + port;
         RequestOptions opts = new RequestOptions()
                 .setHost(address)
                 .setPort(port)
@@ -1284,8 +1424,11 @@ public class ElbV2DataPlane {
                     if (!preserveHostHeader) {
                         clientReq.putHeader("Host", ElbV2TargetResolver.hostHeader(host, port));
                     }
+                    log.dispatched();
                     clientReq.connect()
                             .onSuccess(resp -> {
+                                log.responded(String.valueOf(resp.statusCode()));
+                                log.responding();
                                 req.response().setStatusCode(resp.statusCode());
                                 copyTargetResponseHeaders(resp.headers(), req.response());
                                 cookies.forEach(cookie -> req.response().headers().add("Set-Cookie", cookie));
@@ -1300,9 +1443,14 @@ public class ElbV2DataPlane {
                                 req.response().putHeader("Connection", "Upgrade");
                                 req.response().putHeader("Upgrade", resp.getHeader("Upgrade"));
                                 NetSocket targetSocket = resp.netSocket();
+                                log.tunneled = true;
+                                log.type = "http".equals(log.type) ? "ws" : "wss";
+                                long handshakeOut = ElbV2AccessLogEntry.headBytes(
+                                        "HTTP/1.1 101 Switching Protocols", req.response().headers());
                                 req.toNetSocket()
-                                        .onSuccess(clientSocket ->
-                                                tunnel(clientSocket, targetSocket, idleTimeoutMillis))
+                                        .onSuccess(clientSocket -> tunnel(clientSocket, targetSocket,
+                                                idleTimeoutMillis, (in, out) -> finishLog(log, 101,
+                                                        log.requestHeadBytes + in, handshakeOut + out)))
                                         .onFailure(err -> {
                                             LOG.debugv("WebSocket upgrade to {0}:{1} lost the client: {2}",
                                                     host, String.valueOf(port), err.getMessage());
@@ -1330,20 +1478,23 @@ public class ElbV2DataPlane {
      * Relays bytes both ways until either side closes or no data crosses the tunnel in either
      * direction for the load balancer's {@code idle_timeout.timeout_seconds}, as an ALB does.
      */
-    private void tunnel(NetSocket client, NetSocket target, long idleTimeoutMillis) {
+    private void tunnel(NetSocket client, NetSocket target, long idleTimeoutMillis, BiConsumer<Long, Long> closed) {
         AtomicLong lastActivity = new AtomicLong(System.nanoTime());
         AtomicLong timerId = new AtomicLong(-1);
-        AtomicBoolean closed = new AtomicBoolean();
+        AtomicLong received = new AtomicLong();
+        AtomicLong sent = new AtomicLong();
+        AtomicBoolean done = new AtomicBoolean();
         Runnable close = () -> {
-            if (closed.compareAndSet(false, true)) {
+            if (done.compareAndSet(false, true)) {
                 vertx.cancelTimer(timerId.get());
                 client.close();
                 target.close();
+                closed.accept(received.get(), sent.get());
             }
         };
-        relay(client, target, lastActivity, close);
-        relay(target, client, lastActivity, close);
-        scheduleIdleCheck(idleTimeoutMillis, idleTimeoutMillis, lastActivity, timerId, closed, close);
+        relay(client, target, lastActivity, received, close);
+        relay(target, client, lastActivity, sent, close);
+        scheduleIdleCheck(idleTimeoutMillis, idleTimeoutMillis, lastActivity, timerId, done, close);
     }
 
     private void scheduleIdleCheck(long delayMillis, long idleTimeoutMillis, AtomicLong lastActivity,
@@ -1362,9 +1513,11 @@ public class ElbV2DataPlane {
         }));
     }
 
-    private static void relay(NetSocket source, NetSocket destination, AtomicLong lastActivity, Runnable close) {
+    private static void relay(NetSocket source, NetSocket destination, AtomicLong lastActivity, AtomicLong bytes,
+                              Runnable close) {
         source.handler(buffer -> {
             lastActivity.set(System.nanoTime());
+            bytes.addAndGet(buffer.length());
             destination.write(buffer);
             if (destination.writeQueueFull()) {
                 source.pause();
@@ -1376,7 +1529,7 @@ public class ElbV2DataPlane {
         source.exceptionHandler(err -> close.run());
     }
 
-    private void executeRedirect(io.vertx.core.http.HttpServerRequest req, Action action) {
+    private void executeRedirect(io.vertx.core.http.HttpServerRequest req, Action action, ElbV2AccessLogEntry log) {
         String reqHost = req.host();
         String reqPort = "";
         if (reqHost != null && reqHost.contains(":")) {
@@ -1413,6 +1566,8 @@ public class ElbV2DataPlane {
         }
 
         int statusCode = "HTTP_301".equals(action.getRedirectStatusCode()) ? 301 : 302;
+        log.actions.add("redirect");
+        log.redirectUrl = location.toString();
         req.response()
                 .setStatusCode(statusCode)
                 .putHeader("Location", location.toString())
@@ -1436,7 +1591,9 @@ public class ElbV2DataPlane {
         return result;
     }
 
-    private void executeFixedResponse(io.vertx.core.http.HttpServerRequest req, Action action) {
+    private void executeFixedResponse(io.vertx.core.http.HttpServerRequest req, Action action,
+                                      ElbV2AccessLogEntry log) {
+        log.actions.add("fixed-response");
         int statusCode = 200;
         try {
             if (action.getFixedResponseStatusCode() != null) {

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.RequestPrincipal;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -70,23 +71,60 @@ public class ServiceCallAuthorizer {
             return Decision.ALLOW;
         }
         String servicePrincipal = ServicePrincipals.of(service);
-        String targetService = AwsArnUtils.isArn(resourceArn) ? AwsArnUtils.parse(resourceArn).service() : null;
-        List<ResourcePolicyProvider.ResourcePolicy> policies =
-                ResourcePolicyProviders.policiesFor(resourcePolicyProviders, targetService, resourceArn);
+        List<ResourcePolicyProvider.ResourcePolicy> policies = policiesFor(resourceArn);
         String ownerAccountId = policies.isEmpty() ? null : policies.getFirst().ownerAccountId();
-        List<String> documents = policies.stream()
-                .map(ResourcePolicyProvider.ResourcePolicy::policyDocument)
-                .filter(document -> document != null && !document.isBlank())
-                .toList();
         Map<String, List<String>> context = new LinkedHashMap<>(IamConditionContextResolver.serviceCallContext(
                 servicePrincipal, resourceArn, ownerAccountId, sourceArn, sourceAccount));
         context.putAll(requestContext);
         Decision decision = evaluator.evaluateServicePrincipal(
-                documents.isEmpty() ? null : documents, servicePrincipal, action, resourceArn, context);
+                documents(policies), servicePrincipal, action, resourceArn, context);
         if (decision == Decision.DENY) {
             LOG.infov("IAM enforcement DENY: service={0} action={1} resource={2} source={3}",
                     servicePrincipal, action, resourceArn, sourceArn);
         }
         return decision;
+    }
+
+    /**
+     * Like {@link #authorize(String, String, String, String, String)}, for a service that acts from an
+     * account AWS owns rather than as a service principal, such as the Elastic Load Balancing account
+     * a Region's legacy access-log bucket policies name. The policy has to allow that account's root.
+     */
+    public Decision authorizeAccount(String accountId, String action, String resourceArn,
+                                     String sourceArn, String sourceAccount) {
+        if (!config.services().iam().enforcementEnabled()) {
+            return Decision.ALLOW;
+        }
+        String partition = AwsArnUtils.isArn(resourceArn) ? AwsArnUtils.parse(resourceArn).partition() : null;
+        String principalArn = AwsArnUtils.Arn.global(partition, "iam", accountId, "root").toString();
+        List<ResourcePolicyProvider.ResourcePolicy> policies = policiesFor(resourceArn);
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        context.put("aws:PrincipalAccount", List.of(accountId));
+        context.put("aws:PrincipalArn", List.of(principalArn));
+        if (sourceArn != null) {
+            context.put("aws:SourceArn", List.of(sourceArn));
+        }
+        if (sourceAccount != null) {
+            context.put("aws:SourceAccount", List.of(sourceAccount));
+        }
+        IamPolicyEvaluator.ResourcePolicyDecision decision = evaluator.evaluateResourcePolicyFor(
+                documents(policies), RequestPrincipal.iam(principalArn), action, resourceArn, context);
+        return switch (decision) {
+            case ALLOW, ALLOW_DIRECT_IAM_USER, ALLOW_ACCOUNT -> Decision.ALLOW;
+            default -> Decision.DENY;
+        };
+    }
+
+    private List<ResourcePolicyProvider.ResourcePolicy> policiesFor(String resourceArn) {
+        String targetService = AwsArnUtils.isArn(resourceArn) ? AwsArnUtils.parse(resourceArn).service() : null;
+        return ResourcePolicyProviders.policiesFor(resourcePolicyProviders, targetService, resourceArn);
+    }
+
+    private static List<String> documents(List<ResourcePolicyProvider.ResourcePolicy> policies) {
+        List<String> documents = policies.stream()
+                .map(ResourcePolicyProvider.ResourcePolicy::policyDocument)
+                .filter(document -> document != null && !document.isBlank())
+                .toList();
+        return documents.isEmpty() ? null : documents;
     }
 }

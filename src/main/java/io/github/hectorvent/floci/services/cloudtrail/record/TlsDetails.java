@@ -32,7 +32,7 @@ public record TlsDetails(String tlsVersion, String cipherSuite, String clientPro
      * {@code ECDHE-RSA-AES128-GCM-SHA256}, a CBC suite drops its mode, and plain RSA key exchange is
      * unnamed: {@code TLS_RSA_WITH_AES_128_CBC_SHA} is {@code AES128-SHA}.
      */
-    static String openSslName(String iana) {
+    public static String openSslName(String iana) {
         if (iana == null || !iana.contains("_WITH_")) {
             return iana;
         }

@@ -71,6 +71,10 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     @Inject
     CertificateReferenceResolver certificateResolver;
 
+    /** Left null by the unit tests, like {@link #certificateResolver}; access logs then turn on unchecked. */
+    @Inject
+    ElbV2AccessLogWriter accessLogWriter;
+
     // region → ARN → resource
     private Map<String, Map<String, LoadBalancer>> loadBalancers = new ConcurrentHashMap<>();
     private Map<String, Map<String, TargetGroup>> targetGroups = new ConcurrentHashMap<>();
@@ -390,6 +394,14 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     public void modifyLoadBalancerAttributes(String region, String arn, Map<String, String> newAttrs) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
+        Map<String, String> merged = describeLoadBalancerAttributes(region, arn);
+        merged.putAll(newAttrs);
+        boolean application = lb.getType() == null || "application".equalsIgnoreCase(lb.getType());
+        if (accessLogWriter != null && application && "true".equalsIgnoreCase(merged.get("access_logs.s3.enabled"))
+                && newAttrs.keySet().stream().anyMatch(key -> key.startsWith("access_logs.s3."))) {
+            accessLogWriter.requireDeliverable(region, lb, merged.get("access_logs.s3.bucket"),
+                    merged.get("access_logs.s3.prefix"));
+        }
         lb.getAttributes().putAll(newAttrs);
         persistRegion(loadBalancers, region);
     }
