@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * One Application Load Balancer access-log entry, filled in while the data plane handles a request
@@ -27,6 +29,7 @@ final class ElbV2AccessLogEntry {
             .withZone(ZoneOffset.UTC);
     private static final int MAX_USER_AGENT_BYTES = 8 * 1024;
     private static final List<String> SEVERITY = List.of("Acceptable", "Ambiguous", "Severe");
+    private static final Pattern SELF_FIELD = Pattern.compile("(?<=^|;)Self=[^;]*");
 
     final String loadBalancerArn;
     final String region;
@@ -157,11 +160,20 @@ final class ElbV2AccessLogEntry {
         return method.name() + " " + (secure ? "https" : "http") + "://" + host + ":" + port + uri + " " + httpVersion;
     }
 
-    /** A new {@code X-Amzn-Trace-Id} value, {@code Root=1-<epoch seconds in hex>-<96 random bits>}. */
-    static String newTraceId(Instant now) {
+    /**
+     * The {@code X-Amzn-Trace-Id} the load balancer forwards, as AWS's request-tracing rules give it: a
+     * new {@code Root} when the request has none, else the request's fields with a new {@code Self}
+     * replacing or preceding theirs. Each id is {@code 1-<epoch seconds in hex>-<96 random bits>}.
+     */
+    static String traceIdHeader(String header, Instant now) {
         byte[] random = new byte[12];
         ThreadLocalRandom.current().nextBytes(random);
-        return "Root=1-" + HexFormat.of().toHexDigits((int) now.getEpochSecond()) + "-" + HexFormat.of().formatHex(random);
+        String id = "1-" + HexFormat.of().toHexDigits((int) now.getEpochSecond()) + "-" + HexFormat.of().formatHex(random);
+        if (header == null) {
+            return "Root=" + id;
+        }
+        Matcher self = SELF_FIELD.matcher(header);
+        return self.find() ? self.replaceFirst("Self=" + id) : "Self=" + id + ";" + header;
     }
 
     static String newConnTraceId() {

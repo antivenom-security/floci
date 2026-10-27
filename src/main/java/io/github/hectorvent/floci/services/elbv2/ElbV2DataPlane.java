@@ -838,8 +838,8 @@ public class ElbV2DataPlane {
 
     /**
      * Starts the request's access-log entry and completes it when the response ends. The load
-     * balancer stamps an {@code X-Amzn-Trace-Id} on a request that has none, as AWS does, so the
-     * target and the entry see the same trace.
+     * balancer adds or updates the request's {@code X-Amzn-Trace-Id}, as AWS does, so the target and
+     * the entry see the same trace.
      */
     private ElbV2AccessLogEntry startLog(HttpServerRequest req, RoutedListener listener, ListenerBinding binding,
                                          int port) {
@@ -859,10 +859,8 @@ public class ElbV2DataPlane {
         log.userAgent(req.getHeader("User-Agent"));
         log.requestHeadBytes = ElbV2AccessLogEntry.headBytes(
                 req.method().name() + " " + req.uri() + " HTTP/1.1", req.headers());
-        if (req.getHeader("X-Amzn-Trace-Id") == null) {
-            req.headers().set("X-Amzn-Trace-Id", ElbV2AccessLogEntry.newTraceId(now));
-        }
-        log.traceId = req.getHeader("X-Amzn-Trace-Id");
+        log.traceId = ElbV2AccessLogEntry.traceIdHeader(req.getHeader("X-Amzn-Trace-Id"), now);
+        req.headers().set("X-Amzn-Trace-Id", log.traceId);
         log.connTraceId = connectionTraceIds.get(req.connection());
         String[] classification = ElbV2AccessLogEntry.classify(req.method(), req.headers());
         if (classification != null) {

@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ElbV2AccessLogEntryTest {
 
@@ -40,6 +41,20 @@ class ElbV2AccessLogEntryTest {
                 + "\"Root=1-58337262-36d228ad5d99923122bbe354\" \"-\" \"-\" 0 2018-07-02T22:22:48.364000Z "
                 + "\"redirect\" \"https://www.example.com:443/\" \"-\" \"-\" \"-\" \"-\" \"-\" TID_1234abcd5678ef90 "
                 + "\"-\" \"-\" \"-\" 10.0.0.5 - -", entry.render());
+    }
+
+    @Test
+    void addsOrUpdatesTheTraceIdAsTheRequestTracingDocumentationDoes() {
+        Instant now = Instant.parse("2019-03-08T07:46:43Z");
+        String id = "1-5c821de3-[0-9a-f]{24}";
+        assertTrue(ElbV2AccessLogEntry.traceIdHeader(null, now).matches("Root=" + id));
+        assertTrue(ElbV2AccessLogEntry.traceIdHeader("Root=1-67891233-abcdef012345678912345678;CalledFrom=app", now)
+                .matches("Self=" + id + ";Root=1-67891233-abcdef012345678912345678;CalledFrom=app"));
+        assertTrue(ElbV2AccessLogEntry.traceIdHeader(
+                "Self=1-67891233-12456789abcdef012345678;Root=1-67891233-abcdef012345678912345678", now)
+                .matches("Self=" + id + ";Root=1-67891233-abcdef012345678912345678"));
+        assertTrue(ElbV2AccessLogEntry.traceIdHeader("Root=1-67891233-abcdef012345678912345678;MySelf=x", now)
+                .matches("Self=" + id + ";Root=1-67891233-abcdef012345678912345678;MySelf=x"));
     }
 
     @Test
